@@ -926,6 +926,8 @@ def split_segments_through_vertices(tp, moved):
             continue
         d = U[b_] - U[a_]
         L2 = float(d @ d)
+        if L2 == 0.0:
+            continue        # the weld collapsed this segment; the merge drops it when the two endpoints become one vertex
         # strictly interior, measured along the segment
         tv = [(float((U[v] - U[a_]) @ d) / L2, v) for v in vs]
         tv = [(t, v) for t, v in tv if 0.0 < t < 1.0

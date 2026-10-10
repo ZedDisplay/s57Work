@@ -52,6 +52,15 @@ class PostWeldSplit(unittest.TestCase):
         self.assertEqual(B.split_segments_through_vertices(tp, {3}), 0)
         self.assertEqual(B.split_segments_through_vertices(tp, set()), 0)
 
+    def test_segment_collapsed_by_the_weld_is_skipped(self):
+        # v1 was welded onto v0's coordinates: segment 0 has zero length;
+        # v2 sits on it (distance 0) and must not cause a division by zero
+        # (01CGD, 2026-10-10). The merge removes the segment later.
+        GS = B.GS
+        tp = self.tile([[0, 0], [0, 0], [0, 0], [5 * GS, 5 * GS]], [[0, 1], [2, 3]])
+        self.assertEqual(B.split_segments_through_vertices(tp, {1}), 0)
+        self.assertEqual(len(tp["S"]), 2)
+
     def test_two_vertices_on_one_segment_are_chained_in_order(self):
         GS = B.GS
         tp = self.tile([[0, 0], [10 * GS, 0], [7 * GS, 0], [3 * GS, 0]], [[0, 1]])
