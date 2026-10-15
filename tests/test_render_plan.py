@@ -47,6 +47,39 @@ class PriorityAt(unittest.TestCase):
         self.assertGreater(s57.priority_at(fill, 15), s57.priority_at(band4, 15))
 
 
+class DownwardZooms(unittest.TestCase):
+    """BAND_ZOOM_DOWNWARD: a band also renders below its native floor,
+    ranked by its band like an extension: the native band wins, and in
+    a hole the finer chart beats a coarser band's extension."""
+
+    def test_downward_zooms_lose_to_native_beat_coarser_extensions(self):
+        band3 = source("band3", 3, 9, 14, (11, 12))
+        band1 = source("band1", 1, 9, 10, (7, 8))
+        band2 = source("band2", 2, 9, 12, (9, 10))
+        fill = source("fill", 4.9, 9, 16)
+        self.assertGreater(s57.priority_at(band2, 9), s57.priority_at(band3, 9))
+        self.assertGreater(s57.priority_at(fill, 9), s57.priority_at(band3, 9))
+        self.assertGreater(s57.priority_at(band3, 9), s57.priority_at(band1, 9))
+        # z13-14 with band 3 and band 5 but no band 4: band 5 wins.
+        band5 = source("band5", 5, 13, 16, (15, 16))
+        self.assertGreater(s57.priority_at(band5, 13), s57.priority_at(band3, 13))
+
+    def test_downward_run_is_erased_by_native_and_finer_sources(self):
+        runs = runs_by_label(s57.plan_render_runs([
+            source("band1", 1, 9, 10, (7, 8)),
+            source("band2", 2, 9, 12, (9, 10)),
+            source("band3", 3, 9, 14, (11, 12)),
+            source("band4", 4, 11, 16, (13, 14))]))
+        self.assertEqual(runs["band3"][0], ((9, 10), ["band2"]))
+        self.assertEqual(runs["band4"][0], ((11, 12), ["band3"]))
+        # The coarser extensions give way to the finer downward zooms.
+        self.assertEqual(runs["band1"], [((9, 10), ["band2", "band3"])])
+        self.assertIn(((11, 12), ["band3", "band4"]), runs["band2"])
+        # Native zooms stay unerased.
+        self.assertIn(((11, 12), []), runs["band3"])
+        self.assertIn(((13, 16), []), runs["band4"])  # no band 5 here: one native+extension run
+
+
 class PlanRenderRuns(unittest.TestCase):
     def test_runs_match_the_district_plan(self):
         got = runs_by_label(s57.plan_render_runs(plan()))

@@ -81,6 +81,21 @@ BAND_ZOOM: Dict[int, Tuple[int, int, str, str]] = {
 # in process_by_band for the rationale and cost history.
 BAND_ZOOM_EXTENSION = 2
 
+# How many zoom levels below its native floor each band also renders
+# (capped at the global minzoom). There it ranks like an extension, by
+# its band (priority_at): the native band for the zoom still wins, but
+# in a hole the finer chart beats a coarser band's extension, because a
+# fine chart drawn small only gets denser while a coarse chart drawn
+# large is wrong by its generalisation (band 1 at z10 is a 1:3.5M
+# coastline). NOAA's rescheming leaves bands missing under finer ones —
+# 05CGD's band 2 grid has no cell for 81.6-76.8 W x 33.6-38.4 N once
+# legacy US2EC02M was cancelled, so Cape Fear to New Bern had band 3
+# only and z10 was blank; 178 z14 tiles across the districts had band 5
+# but no band 3 or 4 (2026-10-15 hole scan of the R2 files). Upward
+# extension alone cannot bridge a missing band from above. A band whose
+# native floor is above the global maxzoom (band 6) is still skipped.
+BAND_ZOOM_DOWNWARD = 2
+
 # Zoom presence of point layers inside a source's zoom range.
 #
 # Every layer renders from the bottom zoom of its source (a band, or a
@@ -1543,7 +1558,6 @@ def run_tippecanoe_for_source(
 
 WORLD_WKT = "POLYGON((-180 -90,180 -90,180 90,-180 90,-180 -90))"
 
-
 @dataclass
 class RenderSource:
     """One consolidated GeoJSON set that renders over zoom_range.
@@ -1566,7 +1580,8 @@ class RenderSource:
 
 def priority_at(src: RenderSource, z: int) -> float:
     """Effective priority of a source at zoom z: the native band for that
-    zoom wins outright; otherwise finer data wins."""
+    zoom wins outright; otherwise finer data wins, above the native range
+    (BAND_ZOOM_EXTENSION) and below it (BAND_ZOOM_DOWNWARD) alike."""
     if src.native_zoom and src.native_zoom[0] <= z <= src.native_zoom[1]:
         return src.priority + 10
     return src.priority
@@ -2823,8 +2838,10 @@ def process_by_band(
             skipped = "  <- starts above max zoom, skipping"
         render_max = (min(zoom_max + BAND_ZOOM_EXTENSION, maxzoom)
                       if zoom_max is not None else maxzoom)
+        render_min = (max(zoom_min - BAND_ZOOM_DOWNWARD, minzoom)
+                      if zoom_min is not None and zoom_min <= maxzoom else zoom_min)
         print(f"  Band {band} ({desc}, {scale}): {len(by_band[band])} file(s)"
-              f"  z{zoom_min}-{zoom_max} (renders to z{render_max}){skipped}")
+              f"  z{zoom_min}-{zoom_max} (renders z{render_min}-z{render_max}){skipped}")
 
     # Build list of bands to process
     band_tasks = []
@@ -2832,7 +2849,10 @@ def process_by_band(
         if band not in BAND_ZOOM:
             continue
         zoom_min, zoom_max, desc, scale = BAND_ZOOM[band]
-        effective_min = max(zoom_min, minzoom)
+        # BAND_ZOOM_DOWNWARD zooms below the native floor, for bands that
+        # render at all (a native floor above maxzoom stays skipped).
+        effective_min = max(zoom_min - (BAND_ZOOM_DOWNWARD if zoom_min <= maxzoom else 0),
+                            minzoom)
         # Each band renders BAND_ZOOM_EXTENSION levels past its native
         # ceiling (capped at the global maxzoom): wherever no finer band
         # exists, its tiles are the best available chart at deeper zooms.

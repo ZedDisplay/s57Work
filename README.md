@@ -110,7 +110,7 @@ If `enc-sources.yaml` conflicts on merge, keep your version — it's the one fil
 | 5 | Harbour | z15-16 |
 | 6 | Berthing | z17-18 |
 
-In by-band mode each band also renders two zoom levels past its native ceiling (capped at `--maxzoom`), so wherever no finer chart exists the best available band still fills the deeper zooms. Band 1/2 tiles are then clipped to the district's own region, the union of its band 3+ chart footprints, because ocean-basin overview cells would otherwise put planet-wide tiles and bounds into every district file. The clip is written to a separate `*.region.mbtiles` file in `data/tiles/`; the per-band tippecanoe outputs are left untouched so resume keeps working.
+In by-band mode each band also renders two zoom levels past its native ceiling (capped at `--maxzoom`), so wherever no finer chart exists the best available band still fills the deeper zooms. It also renders two zoom levels below its native floor (capped at `--minzoom`), so where NOAA has no chart of the band native to a zoom (e.g. the band 2 gap off North Carolina left by the cancelled US2EC02M) the finer chart fills those zooms instead of leaving them blank or showing an overview chart stretched past its scale; wherever the native band exists, it wins. Band 1/2 tiles are then clipped to the district's own region, the union of its band 3+ chart footprints, because ocean-basin overview cells would otherwise put planet-wide tiles and bounds into every district file. The clip is written to a separate `*.region.mbtiles` file in `data/tiles/`; the per-band tippecanoe outputs are left untouched so resume keeps working.
 
 ## Documentation
 

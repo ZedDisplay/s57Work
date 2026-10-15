@@ -6,6 +6,8 @@ data/merged/*
 data/tiles/*
 # Mesh build work directory (z16 pickles, tile/mesh .npz, logs)
 data/mesh/*
+# Bathymetry pilot work directory (venv, downloads, composites; code on branch a-world-apart)
+data/bathy/*
 !data/*/.gitkeep
 # NOAA product catalog: 50+ MB, refreshed daily by the tool
 data/ENCProdCat_19115.xml

@@ -67,9 +67,11 @@ class ByBandPipeline(unittest.TestCase):
         w = float(h.metadata(self.out)["bounds"].split(",")[0])
         self.assertGreater(w, -72.0, "New Jersey cell leaked into the tiles")
 
-    def test_zoom_range_is_band4_bottom_to_maxzoom(self):
+    def test_zoom_range_is_band4_downward_floor_to_maxzoom(self):
+        # No band 3 in the fixture: band 4 also renders its
+        # BAND_ZOOM_DOWNWARD zooms (z11-12) below its native z13.
         meta = h.metadata(self.out)
-        self.assertEqual((meta["minzoom"], meta["maxzoom"]), ("13", "16"))
+        self.assertEqual((meta["minzoom"], meta["maxzoom"]), ("11", "16"))
         self.assertEqual(meta["type"], "S-57")
 
     def test_scale_is_the_finest_cell_compilation_scale(self):
@@ -147,6 +149,29 @@ class ByBandPipeline(unittest.TestCase):
             covr = [f for f in layers.get("M_COVR", [])
                     if f["properties"].get("CATCOV") == 1]
             self.assertEqual(len(covr), 1)
+
+    # -- downward fill (BAND_ZOOM_DOWNWARD) ----------------------------------
+
+    def test_band4_fills_the_missing_band3_zooms(self):
+        # The fixture has no band 3, so band 4 alone draws z11-12: one
+        # chart per tile, and no soundings (they start at the native floor).
+        for z in (11, 12):
+            layers = self._tile_at(*BAND4_ONLY_POINT, z)
+            self.assertGreater(len(layers.get("DEPARE", [])), 0, f"z{z} blank")
+            covr = [f for f in layers.get("M_COVR", [])
+                    if f["properties"].get("CATCOV") == 1]
+            self.assertEqual(len(covr), 1, f"z{z}: {len(covr)} charts stacked")
+        r = self.counts("SOUNDG", BAND4_BOX, [11, 12])
+        self.assertEqual((r[11]["features"], r[12]["features"]), (0, 0))
+
+    def test_band5_downward_zooms_lose_to_native_band4(self):
+        # Band 5's z13-14 lie wholly inside band 4's native coverage, so
+        # the native band 4 is the only chart there.
+        for z in (13, 14):
+            layers = self._tile_at(*BAND5_AD_CENTER, z)
+            covr = [f for f in layers.get("M_COVR", [])
+                    if f["properties"].get("CATCOV") == 1]
+            self.assertEqual(len(covr), 1, f"z{z}: {len(covr)} charts stacked")
 
     # -- PMTiles copy --------------------------------------------------------
 
