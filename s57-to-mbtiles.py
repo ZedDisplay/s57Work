@@ -81,6 +81,34 @@ BAND_ZOOM: Dict[int, Tuple[int, int, str, str]] = {
 # in process_by_band for the rationale and cost history.
 BAND_ZOOM_EXTENSION = 2
 
+# How many zoom levels below its native floor each band also renders
+# (capped at the global minzoom). There it ranks like an extension, by
+# its band (priority_at): the native band for the zoom still wins, but
+# in a hole the finer chart beats a coarser band's extension, because a
+# fine chart drawn small only gets denser while a coarse chart drawn
+# large is wrong by its generalisation (band 1 at z10 is a 1:3.5M
+# coastline). NOAA's rescheming leaves bands missing under finer ones —
+# 05CGD's band 2 grid has no cell for 81.6-76.8 W x 33.6-38.4 N once
+# legacy US2EC02M was cancelled, so Cape Fear to New Bern had band 3
+# only and z10 was blank; 178 z14 tiles across the districts had band 5
+# but no band 3 or 4 (2026-10-15 hole scan of the R2 files). Upward
+# extension alone cannot bridge a missing band from above. A band whose
+# native floor is above the global maxzoom (band 6) is still skipped.
+BAND_ZOOM_DOWNWARD = 2
+
+
+def band_render_range(band: int, minzoom: int,
+                      maxzoom: int) -> Tuple[int, int]:
+    """Zooms a band renders in by-band mode: BAND_ZOOM_DOWNWARD below its
+    native floor to BAND_ZOOM_EXTENSION past its native ceiling, capped
+    at the global minzoom and maxzoom. A band whose native floor is above
+    maxzoom gets no downward zooms, so its range comes back empty
+    (min > max) and the band is skipped."""
+    zoom_min, zoom_max = BAND_ZOOM[band][:2]
+    down = BAND_ZOOM_DOWNWARD if zoom_min <= maxzoom else 0
+    return (max(zoom_min - down, minzoom),
+            min(zoom_max + BAND_ZOOM_EXTENSION, maxzoom))
+
 # Zoom presence of point layers inside a source's zoom range.
 #
 # Every layer renders from the bottom zoom of its source (a band, or a
@@ -1543,7 +1571,6 @@ def run_tippecanoe_for_source(
 
 WORLD_WKT = "POLYGON((-180 -90,180 -90,180 90,-180 90,-180 -90))"
 
-
 @dataclass
 class RenderSource:
     """One consolidated GeoJSON set that renders over zoom_range.
@@ -1566,7 +1593,8 @@ class RenderSource:
 
 def priority_at(src: RenderSource, z: int) -> float:
     """Effective priority of a source at zoom z: the native band for that
-    zoom wins outright; otherwise finer data wins."""
+    zoom wins outright; otherwise finer data wins, above the native range
+    (BAND_ZOOM_EXTENSION) and below it (BAND_ZOOM_DOWNWARD) alike."""
     if src.native_zoom and src.native_zoom[0] <= z <= src.native_zoom[1]:
         return src.priority + 10
     return src.priority
@@ -1958,16 +1986,23 @@ def _region_mask(detail_tiles: List[Path]) -> set:
     REGION_MASK_ZOOM, dilated by one tile. TMS rows throughout — ancestor
     math (right-shift) is row-order-agnostic.
 
-    Only each file's bottom-zoom rows are read: coverage at the bottom
-    zoom already spans the file's footprint, and streaming just that level
-    avoids materializing the millions of z16 rows a district's band 4/5
-    files carry."""
+    Only one level per file is read, its shallowest at or below
+    REGION_MASK_ZOOM: coverage there already spans the file's footprint,
+    and streaming just that level avoids materializing the millions of z16
+    rows a district's band 4/5 files carry. A file that starts above the
+    mask zoom (a band's BAND_ZOOM_DOWNWARD zooms tiled in one run with its
+    native ones, e.g. band 3 at z9-12 when there is no band 2 to erase it)
+    is read at REGION_MASK_ZOOM. A file that ends above it (a downward run
+    erased by the coarser band) is skipped: its coverage lies inside the
+    same band's native run, which is read."""
     mask: set = set()
     for path in detail_tiles:
         db = sqlite3.connect(str(path))
         table = _tile_table(db)
-        zmin = db.execute(f"SELECT MIN(zoom_level) FROM {table}").fetchone()[0]
-        if zmin is None or zmin < REGION_MASK_ZOOM:
+        zmin = db.execute(f"SELECT MIN(zoom_level) FROM {table} "
+                          "WHERE zoom_level >= ?",
+                          (REGION_MASK_ZOOM,)).fetchone()[0]
+        if zmin is None:
             db.close()
             continue
         shift = zmin - REGION_MASK_ZOOM
@@ -2821,10 +2856,10 @@ def process_by_band(
         skipped = ""
         if zoom_min is not None and zoom_min > maxzoom:
             skipped = "  <- starts above max zoom, skipping"
-        render_max = (min(zoom_max + BAND_ZOOM_EXTENSION, maxzoom)
-                      if zoom_max is not None else maxzoom)
+        render_min, render_max = (band_render_range(band, minzoom, maxzoom)
+                                  if band in BAND_ZOOM else (None, maxzoom))
         print(f"  Band {band} ({desc}, {scale}): {len(by_band[band])} file(s)"
-              f"  z{zoom_min}-{zoom_max} (renders to z{render_max}){skipped}")
+              f"  z{zoom_min}-{zoom_max} (renders z{render_min}-z{render_max}){skipped}")
 
     # Build list of bands to process
     band_tasks = []
@@ -2832,7 +2867,8 @@ def process_by_band(
         if band not in BAND_ZOOM:
             continue
         zoom_min, zoom_max, desc, scale = BAND_ZOOM[band]
-        effective_min = max(zoom_min, minzoom)
+        # BAND_ZOOM_DOWNWARD zooms below the native floor, for bands that
+        # render at all (a native floor above maxzoom stays skipped).
         # Each band renders BAND_ZOOM_EXTENSION levels past its native
         # ceiling (capped at the global maxzoom): wherever no finer band
         # exists, its tiles are the best available chart at deeper zooms.
@@ -2847,7 +2883,7 @@ def process_by_band(
         # district builds 4-6x in size and blew the 6h CI timeout /
         # runner disk on Pacific districts (band 1 of 14CGD at z16 =
         # tiling the whole Pacific EEZ at harbour zoom).
-        effective_max = min(zoom_max + BAND_ZOOM_EXTENSION, maxzoom)
+        effective_min, effective_max = band_render_range(band, minzoom, maxzoom)
         if effective_min > effective_max:
             continue
         band_tasks.append((band, by_band[band], effective_min, effective_max,
