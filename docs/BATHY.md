@@ -1,6 +1,6 @@
 # Bathymetry layer outside US chart coverage (design)
 
-Status: design, decisions of 2026-10-11 recorded (see **Decisions**). No code yet.
+Status: **parked 2026-10-15** (see **Outcome**). Pilot code kept on branch `a-world-apart`, not merged.
 
 ## Purpose
 
@@ -207,3 +207,32 @@ continuous updates.
 - A Cloud Storage bucket for the exported composites, readable by that
   service account.
 - A NASA Earthdata login for ICESat-2, as a repository secret.
+
+## Outcome (2026-10-15): parked
+
+Wider test, 2026-10-14: five more 1° squares under 07CGD's charts (Puerto
+Rico NW, NE, SW, SE, and St Croix) plus the pilot, tide-corrected to LAT
+from the Copernicus hourly record (passes from 2022-09 only), checked
+leave-one-square-out (`bathy-loso.py`). The shoal correction passed in
+every held-out square only at the strictest sizing margin (4 %), and the
+resulting curve (predicted depth, shift: 1 m 0.35, 3.5 m 0.58, 7.5 m
+3.77, 15 m 3.92) turns everything the satellite puts under about 6 m into
+keep-out and shows 5-10 m water 3-4 m too shallow. Northeast Puerto Rico
+drives it: held out, the 7.5 m shift is 2.2 m instead of about 3.8 m.
+Northwest Puerto Rico's fit was flat (few clear-water points, steep
+shelf); southeast Puerto Rico had almost no usable check data. Earth
+Engine: about 120 of the roughly 150 monthly EECU-hours for six squares.
+
+Conclusion (user): satellite-derived depth from the Sentinel-2 band ratio
+does not work well enough here: safe only when made so conservative that
+it adds little, and with no way to know in advance where the next
+northeast-Puerto-Rico-like water is.
+
+Worth keeping: the chart-file pipeline (`bathy/chart.py`: merge,
+three-level generalisation, international contours, soundings with SCAMIN,
+S-57 record fields, coastline) and the mesh's `--only-coverage` switch work
+for any depth source; ICESat-2 ATL24 depths are accurate to about half a
+metre and in the pilot square put half of all 0-20 m water within 250 m of
+a measured depth (96 % within 1 km), as track lines rather than areas;
+a GEBCO-only layer would be an honest offshore product.
+
