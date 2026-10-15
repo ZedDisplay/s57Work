@@ -71,6 +71,7 @@ BOX = None                 # (west, south, east, north) of the mesh rectangle
 TILE = 0.25
 K = 1.0                    # x scale: cos(mid-latitude of BOX)
 SNAP = False               # move disc corners within SNAP_TOL onto nearby lines
+ONLY_COVERAGE = False      # mesh only water inside the input's M_COVR (CATCOV 1); bathymetry builds (2026-10-11)
 DEBUG_POINTS = []          # [(lon, lat)] to dump face/layer details for
 PRIORITY = ["z16"]
 
@@ -118,15 +119,16 @@ REJOIN = {}  # layer -> (tile pieces, features after rejoining)
 
 
 def configure(box_, out, land=None, pkl=None, data="", tile=0.25, snap=False,
-              debug_points=(), priority=None):
+              debug_points=(), priority=None, only_coverage=False):
     """Set the build's parameters. `box_` is (west, south, east, north);
     the x scale is cos of its mid-latitude. One of `pkl` (decoded z16
     layers) or `data` (merged GeoJSON per source) must be given."""
-    global BOX, OUT, OSM, PKL, DATA, TILE, K, SNAP, DEBUG_POINTS, PRIORITY
+    global BOX, OUT, OSM, PKL, DATA, TILE, K, SNAP, DEBUG_POINTS, PRIORITY, ONLY_COVERAGE
     BOX = tuple(float(v) for v in box_)
     OUT, OSM, PKL, DATA, TILE = out, land, pkl, data, tile
     K = math.cos(math.radians((BOX[1] + BOX[3]) / 2))
     SNAP = bool(snap)
+    ONLY_COVERAGE = bool(only_coverage)
     DEBUG_POINTS = list(debug_points)
     if pkl:
         PRIORITY = ["z16"]          # the grid reads z16 tiles as one source, no band priority
@@ -536,6 +538,9 @@ def process_tile(args):
             k = np.arange(m + 1) / m
             lines.append(shapely.linestrings(np.column_stack([ax + (bx - ax) * k, ay + (by - ay) * k])))
         lines.append(tbig.boundary)
+        # --only-coverage: the coverage edge cuts the faces, so the mesh stops exactly there
+        if ONLY_COVERAGE and higher is not None:
+            lines.append(shapely.set_precision(shapely.boundary(shapely.intersection(higher, tbig)), GS))
         st["input_polys"] = sum(len(v) for v in area.values())
         st["input_vertices"] = int(sum(shapely.get_num_coordinates(np.array(lines, dtype=object))))
         T["2 boundaries"] = time.perf_counter() - t
@@ -555,7 +560,15 @@ def process_tile(args):
         reps = shapely.point_on_surface(faces)
         A = {k: np.zeros(nf) for k in ("land", "struct", "dredged", "unsurv", "catzoc", "fair",
                                        "tsez", "resare", "track", "navlne", "haz", "mark", "chanmark", "is_nav",
-                                       "opening")}
+                                       "opening", "outside")}
+        # --only-coverage: water outside the input's own coverage is not meshed; it becomes
+        # a hole, but not land (the land-area check counts only land holes)
+        if ONLY_COVERAGE:
+            if higher is None:
+                A["outside"][:] = 1
+            else:
+                shapely.prepare(higher)
+                A["outside"][~shapely.contains_xy(higher, *shapely.get_coordinates(reps).T)] = 1
         A["depth"] = np.full(nf, -999.0)
         A["clear"] = np.full(nf, -999.0)
         A["tss"] = np.full(nf, -999.0)
@@ -648,7 +661,7 @@ def process_tile(args):
                 vals.append(sq_min[a])                                 # soundings
             A["depth"][a] = min(vals) if vals else -999.0
         cols = ["land", "struct", "depth", "dredged", "unsurv", "catzoc", "clear", "fair", "tss",
-                "tsez", "resare", "track", "navlne", "haz", "hazv", "mark", "chanmark", "is_nav", "opening"]
+                "tsez", "resare", "track", "navlne", "haz", "hazv", "mark", "chanmark", "is_nav", "opening", "outside"]
         keys = np.column_stack([A[c] for c in cols])
         ukeys, inv = np.unique(keys, axis=0, return_inverse=True)
         inv = inv.ravel()
@@ -659,8 +672,9 @@ def process_tile(args):
                 u = shapely.coverage_union_all(members)
             except Exception:
                 u = shapely.union_all(members, grid_size=GS)
+            out_col = ukeys[g][cols.index("outside")]
             for p in polys(u):
-                if ukeys[g][0]:
+                if ukeys[g][0] or out_col:
                     holes.append((p, int(ukeys[g][0])))
                 else:
                     parts.append(p); part_key.append(g)

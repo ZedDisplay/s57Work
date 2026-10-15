@@ -1,0 +1,11 @@
+# Bathymetry pilot (bathy-pilot.py). Separate from the chart tool
+# (standard library only) and the mesh build (mesh/requirements.txt).
+earthengine-api==1.7.47
+google-cloud-storage==3.17.0
+earthaccess==0.19.0
+h5py==3.16.0
+rasterio==1.5.2
+numpy==2.5.4
+scipy==1.18.1
+shapely==2.2.0
+mapbox-vector-tile==2.2.0

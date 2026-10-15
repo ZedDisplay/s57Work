@@ -101,6 +101,9 @@ def main(argv=None):
                     help="worker processes for decode and tiles (default cpu count - 1)")
     ap.add_argument("--reuse-decoded", action="store_true",
                     help="skip stage 1 when <work>/z16_layers already holds pickles")
+    ap.add_argument("--only-coverage", action="store_true",
+                    help="mesh only water inside the input's own coverage (M_COVR CATCOV 1); for bathymetry "
+                         "layers, whose data stops at their coverage edge. Districts build without it.")
     ap.add_argument("--snap-discs", action="store_true",
                     help="move disc corners within 2 m of another line onto it (off, as in the kept experiment build)")
     ap.add_argument("--debug-point", action="append", default=[], metavar="LON,LAT",
@@ -185,7 +188,7 @@ def main(argv=None):
                 shutil.rmtree(d)
         log(f"\nstage 3: build {c.slug} -> {bdir}")
         config = dict(box_=c.box, out=bdir, land=a.land, pkl=pkl, tile=a.tile_deg, snap=a.snap_discs,
-                      debug_points=debug_points)
+                      debug_points=debug_points, only_coverage=a.only_coverage)
         try:
             # Two fresh interpreters: the tile stage, then the global
             # refinement, so the refinement (the memory peak) does not
@@ -243,6 +246,7 @@ def main(argv=None):
         "builder_version": project_version(),
         "workers": a.workers,
         "snap_discs": a.snap_discs,
+        "only_coverage": a.only_coverage,
         "box_override": a.box,
         "sources": [{"file": os.path.basename(p), "bytes": os.path.getsize(p), "sha256": sha256(p)}
                     for p in a.mbtiles],
