@@ -96,6 +96,19 @@ BAND_ZOOM_EXTENSION = 2
 # native floor is above the global maxzoom (band 6) is still skipped.
 BAND_ZOOM_DOWNWARD = 2
 
+
+def band_render_range(band: int, minzoom: int,
+                      maxzoom: int) -> Tuple[int, int]:
+    """Zooms a band renders in by-band mode: BAND_ZOOM_DOWNWARD below its
+    native floor to BAND_ZOOM_EXTENSION past its native ceiling, capped
+    at the global minzoom and maxzoom. A band whose native floor is above
+    maxzoom gets no downward zooms, so its range comes back empty
+    (min > max) and the band is skipped."""
+    zoom_min, zoom_max = BAND_ZOOM[band][:2]
+    down = BAND_ZOOM_DOWNWARD if zoom_min <= maxzoom else 0
+    return (max(zoom_min - down, minzoom),
+            min(zoom_max + BAND_ZOOM_EXTENSION, maxzoom))
+
 # Zoom presence of point layers inside a source's zoom range.
 #
 # Every layer renders from the bottom zoom of its source (a band, or a
@@ -2836,10 +2849,8 @@ def process_by_band(
         skipped = ""
         if zoom_min is not None and zoom_min > maxzoom:
             skipped = "  <- starts above max zoom, skipping"
-        render_max = (min(zoom_max + BAND_ZOOM_EXTENSION, maxzoom)
-                      if zoom_max is not None else maxzoom)
-        render_min = (max(zoom_min - BAND_ZOOM_DOWNWARD, minzoom)
-                      if zoom_min is not None and zoom_min <= maxzoom else zoom_min)
+        render_min, render_max = (band_render_range(band, minzoom, maxzoom)
+                                  if band in BAND_ZOOM else (None, maxzoom))
         print(f"  Band {band} ({desc}, {scale}): {len(by_band[band])} file(s)"
               f"  z{zoom_min}-{zoom_max} (renders z{render_min}-z{render_max}){skipped}")
 
@@ -2851,8 +2862,6 @@ def process_by_band(
         zoom_min, zoom_max, desc, scale = BAND_ZOOM[band]
         # BAND_ZOOM_DOWNWARD zooms below the native floor, for bands that
         # render at all (a native floor above maxzoom stays skipped).
-        effective_min = max(zoom_min - (BAND_ZOOM_DOWNWARD if zoom_min <= maxzoom else 0),
-                            minzoom)
         # Each band renders BAND_ZOOM_EXTENSION levels past its native
         # ceiling (capped at the global maxzoom): wherever no finer band
         # exists, its tiles are the best available chart at deeper zooms.
@@ -2867,7 +2876,7 @@ def process_by_band(
         # district builds 4-6x in size and blew the 6h CI timeout /
         # runner disk on Pacific districts (band 1 of 14CGD at z16 =
         # tiling the whole Pacific EEZ at harbour zoom).
-        effective_max = min(zoom_max + BAND_ZOOM_EXTENSION, maxzoom)
+        effective_min, effective_max = band_render_range(band, minzoom, maxzoom)
         if effective_min > effective_max:
             continue
         band_tasks.append((band, by_band[band], effective_min, effective_max,

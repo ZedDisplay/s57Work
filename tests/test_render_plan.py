@@ -64,6 +64,16 @@ class DownwardZooms(unittest.TestCase):
         band5 = source("band5", 5, 13, 16, (15, 16))
         self.assertGreater(s57.priority_at(band5, 13), s57.priority_at(band3, 13))
 
+    def test_band_render_range(self):
+        self.assertEqual(s57.band_render_range(1, 9, 16), (9, 10))
+        self.assertEqual(s57.band_render_range(2, 9, 16), (9, 12))   # capped at minzoom
+        self.assertEqual(s57.band_render_range(3, 9, 16), (9, 14))
+        self.assertEqual(s57.band_render_range(4, 9, 16), (11, 16))
+        self.assertEqual(s57.band_render_range(5, 9, 16), (13, 16))  # capped at maxzoom
+        lo, hi = s57.band_render_range(6, 9, 16)                     # floor above maxzoom
+        self.assertGreater(lo, hi)
+        self.assertEqual(s57.band_render_range(6, 9, 18), (15, 18))
+
     def test_downward_run_is_erased_by_native_and_finer_sources(self):
         runs = runs_by_label(s57.plan_render_runs([
             source("band1", 1, 9, 10, (7, 8)),
