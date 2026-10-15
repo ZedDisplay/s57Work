@@ -117,6 +117,16 @@ class RegionMask(unittest.TestCase):
         make_mbtiles(p, [(9, 300, 380)]).close()
         self.assertEqual(s57._region_mask([p]), set())
 
+    def test_file_starting_above_mask_zoom_is_read_at_mask_zoom(self):
+        # Band 3 at z9-12 in one run (a district with band 1 but no band 2,
+        # so nothing erases its downward zooms).
+        p = Path(tempfile.mkdtemp()) / "band3.mbtiles"
+        make_mbtiles(p, [(9, 146, 307), (10, 292, 614), (11, 585, 1229),
+                         (12, 1170, 2458)]).close()
+        mask = s57._region_mask([p])
+        self.assertIn((585, 1229), mask)
+        self.assertEqual(len(mask), 9)
+
     def test_recompute_bounds_uses_deepest_zoom(self):
         p = Path(tempfile.mkdtemp()) / "t.mbtiles"
         db = make_mbtiles(p, [(0, 0, 0), (2, 1, 2)])

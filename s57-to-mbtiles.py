@@ -1986,16 +1986,23 @@ def _region_mask(detail_tiles: List[Path]) -> set:
     REGION_MASK_ZOOM, dilated by one tile. TMS rows throughout — ancestor
     math (right-shift) is row-order-agnostic.
 
-    Only each file's bottom-zoom rows are read: coverage at the bottom
-    zoom already spans the file's footprint, and streaming just that level
-    avoids materializing the millions of z16 rows a district's band 4/5
-    files carry."""
+    Only one level per file is read, its shallowest at or below
+    REGION_MASK_ZOOM: coverage there already spans the file's footprint,
+    and streaming just that level avoids materializing the millions of z16
+    rows a district's band 4/5 files carry. A file that starts above the
+    mask zoom (a band's BAND_ZOOM_DOWNWARD zooms tiled in one run with its
+    native ones, e.g. band 3 at z9-12 when there is no band 2 to erase it)
+    is read at REGION_MASK_ZOOM. A file that ends above it (a downward run
+    erased by the coarser band) is skipped: its coverage lies inside the
+    same band's native run, which is read."""
     mask: set = set()
     for path in detail_tiles:
         db = sqlite3.connect(str(path))
         table = _tile_table(db)
-        zmin = db.execute(f"SELECT MIN(zoom_level) FROM {table}").fetchone()[0]
-        if zmin is None or zmin < REGION_MASK_ZOOM:
+        zmin = db.execute(f"SELECT MIN(zoom_level) FROM {table} "
+                          "WHERE zoom_level >= ?",
+                          (REGION_MASK_ZOOM,)).fetchone()[0]
+        if zmin is None:
             db.close()
             continue
         shift = zmin - REGION_MASK_ZOOM
