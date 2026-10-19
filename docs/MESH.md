@@ -197,7 +197,17 @@ it:
 - the same two files to R2 `charts/`;
 - the unpacked folder to R2 `charts/mesh/<D>/` with `aws s3 sync
   --delete`, so a mirror of that prefix is a valid `meshDir`;
-- `charts/mesh/index.json` rebuilt from every `*_mesh.json` in `charts/`;
+- `charts/mesh/index.json` rebuilt by `mesh-catalog.py` from every
+  `*_mesh.json` in `charts/`: version 1, one entry per mesh with `name`,
+  `dir`, `archive` (relative, `<D>_mesh.tar.zst`), `archive_url` (the
+  absolute HTTPS URL of that archive), `sidecar`, `build_date`,
+  `chart_build_date` (or null), `format`, `triangles`, `bytes` and
+  `clusters[].box`. The script validates every field the plugin requires
+  (name charset, `.tar.zst`, ISO dates, non-negative counts, a non-empty
+  cluster list with finite `[west, south, east, north]` boxes) and HEADs
+  every `archive_url` for 200 and a plausible `Content-Length`; one bad
+  entry fails the step and the previous catalogue stays. The archive's
+  top folder is `<D>_mesh/`, which the plugin unpacks from;
 - the release notes rewritten by `release-notes.sh` (shared with the
   chart workflow): charts section, then a navigation meshes section.
 

@@ -8,6 +8,17 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- `mesh-catalog.py` writes and validates the mesh catalogue
+  `charts/mesh/index.json` that the router plugin downloads meshes from.
+  Every entry now carries `archive_url`, the absolute HTTPS URL of its
+  archive, beside the relative `archive` kept for older plugin versions;
+  every required field is checked (name charset, `.tar.zst`, ISO dates,
+  non-negative `bytes` and `triangles`, non-empty `clusters` with finite
+  boxes) and every `archive_url` is HEADed for 200 and a plausible
+  `Content-Length` before the catalogue is published. A bad entry fails
+  the step instead of publishing a row the plugin would refuse. The
+  catalogue version stays 1: `archive_url` is additive and a version 1
+  reader without it keeps working. Tests in `tests/test_mesh_catalog.py`.
 - CI test pathway: `workflow_dispatch` gained a `publish` input that
   defaults to `test`. A test run builds normally but the `release` job is
   skipped; a `test-stage` job mirrors the outputs to R2

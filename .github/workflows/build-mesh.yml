@@ -391,30 +391,23 @@ jobs:
             exit 1
           fi
 
+      # The catalogue the router plugin downloads meshes from. mesh-catalog.py
+      # builds one entry per sidecar in charts/, with the absolute archive_url,
+      # checks every field the plugin requires and HEADs every archive; a
+      # single bad entry fails this step and the old catalogue stays.
       - name: Write charts/mesh/index.json (every published mesh)
-        if: ${{ env.R2_ACCOUNT_ID != '' }}
+        if: ${{ env.R2_ACCOUNT_ID != '' && env.R2_PUBLIC_URL != '' }}
         run: |
           BUCKET="${BUCKET%/}"
+          PUB="${R2_PUBLIC_URL%/}"
+          case "$BUCKET" in
+            */*) PUB="$PUB/${BUCKET#*/}" ;;
+          esac
           mkdir -p sidecars
           for key in $(aws s3 ls --endpoint-url "$ENDPOINT" "s3://$BUCKET/charts/" | awk '$4 ~ /_mesh\.json$/ {print $4}'); do
             aws s3 cp --endpoint-url "$ENDPOINT" --no-progress "s3://$BUCKET/charts/$key" "sidecars/$key"
           done
-          python3 - <<'EOF'
-          import glob, json, datetime
-          meshes = []
-          for p in sorted(glob.glob("sidecars/*_mesh.json")):
-              s = json.load(open(p))
-              meshes.append({
-                  "name": s["name"], "dir": f"mesh/{s['name']}/", "archive": f"{s['name']}_mesh.tar.zst",
-                  "sidecar": f"{s['name']}_mesh.json", "build_date": s["build_date"],
-                  "chart_build_date": s.get("chart_build_date"), "format": s["format"],
-                  "triangles": s["triangles"], "bytes": s["bytes"],
-                  "clusters": [{"dir": c["dir"], "box": c["box"]} for c in s["clusters"]],
-              })
-          json.dump({"version": 1, "updated": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                     "meshes": meshes}, open("index.json", "w"), indent=1)
-          print(json.dumps(meshes, indent=1))
-          EOF
+          python3 mesh-catalog.py --sidecars sidecars --public-url "$PUB/charts" -o index.json --check-urls
           aws s3 cp --endpoint-url "$ENDPOINT" --no-progress index.json "s3://$BUCKET/charts/mesh/index.json"
 
       - name: Rewrite the release notes (charts and meshes)
