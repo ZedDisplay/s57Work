@@ -133,6 +133,9 @@ def build_catalog(sidecar_paths, public_url, check_urls=False, head_fn=head, now
     for p in sorted(sidecar_paths):
         try:
             s = json.load(open(p))
+            if os.path.basename(p) != f"{s['name']}_mesh.json":
+                problems.append(f"{os.path.basename(p)}: sidecar name {s['name']!r} does not match its filename")
+                continue
             e = entry_from_sidecar(s, public_url)
         except (KeyError, TypeError, ValueError, OSError) as ex:
             problems.append(f"{os.path.basename(p)}: unreadable sidecar: {ex!r}")
@@ -159,10 +162,11 @@ def main(argv=None):
     if not paths:
         sys.exit(f"no *_mesh.json under {a.sidecars}")
     cat, problems = build_catalog(paths, a.public_url, check_urls=a.check_urls)
-    for e in cat["meshes"]:
-        print(f"{e['name']}: {e['triangles']:,} triangles, {e['bytes']/1e9:.2f} GB unpacked, "
-              f"built {e['build_date']} from chart {e['chart_build_date']}, {len(e['clusters'])} cluster(s), {e['archive_url']}")
-    if problems:
+    if not problems:
+        for e in cat["meshes"]:
+            print(f"{e['name']}: {e['triangles']:,} triangles, {e['bytes']/1e9:.2f} GB unpacked, "
+                  f"built {e['build_date']} from chart {e['chart_build_date']}, {len(e['clusters'])} cluster(s), {e['archive_url']}")
+    else:
         print(f"\n{len(problems)} problem(s); index.json NOT written:", file=sys.stderr)
         for p in problems:
             print("  " + p, file=sys.stderr)
