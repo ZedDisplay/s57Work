@@ -39,6 +39,10 @@ def counter():
     return load_script("count-layer-by-zoom.py")
 
 
+def mesh_catalog():
+    return load_script("mesh-catalog.py")
+
+
 HAVE_GDAL = bool(shutil.which("ogr2ogr") and shutil.which("ogrinfo"))
 HAVE_TIPPECANOE = bool(shutil.which("tippecanoe") and shutil.which("tile-join")
                        and shutil.which("tippecanoe-decode"))

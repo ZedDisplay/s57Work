@@ -1,17 +1,14 @@
 """The mesh catalogue (charts/mesh/index.json) writer and validator,
 mesh-catalog.py: the fields the plugin requires, the URL check, and the
 refusal to write a catalogue with a bad entry."""
-import importlib.util
 import json
 import os
 import tempfile
 import unittest
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-spec = importlib.util.spec_from_file_location("mesh_catalog", ROOT / "mesh-catalog.py")
-mc = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mc)
+from tests.helpers import mesh_catalog
+
+mc = mesh_catalog()
 
 PUB = "https://example.test/US-ENC/charts"
 
