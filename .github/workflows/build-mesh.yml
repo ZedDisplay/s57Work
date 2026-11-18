@@ -68,11 +68,14 @@ jobs:
           publish=false
           if [ "$EVENT" = "workflow_run" ]; then
             # Only ever fires for the default branch's chart workflow.
-            if [ "$UPSTREAM" != "success" ]; then
-              echo "Chart build concluded '$UPSTREAM'; meshes stay as they are." | tee -a "$GITHUB_STEP_SUMMARY"
-              echo "publish=skip" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
+            # Whatever that run concluded: each district is judged by its own
+            # record on R2 (the plan below), which the chart workflow uploads
+            # last and only when that district's chart files landed. Until
+            # 2026-11-18 a chart run that had not concluded 'success' skipped
+            # every mesh, so on 2026-11-01 two failed uploads (one of them a
+            # .pmtiles, which no mesh reads) left all eight meshes a build
+            # behind their charts.
+            echo "Chart build concluded '$UPSTREAM'; each district's mesh is judged by its chart's record on R2." | tee -a "$GITHUB_STEP_SUMMARY"
             publish=true
           elif [ "$CHOICE" = "release" ]; then
             if [ "$REF" != "$DEFAULT" ]; then
@@ -362,7 +365,7 @@ jobs:
               echo "::warning::$d: archive exceeds 2 GiB, R2 only"
             fi
             if [ -n "$R2_ACCOUNT_ID" ]; then
-              aws s3 cp --endpoint-url "$ENDPOINT" --no-progress "$tar" "s3://$BUCKET/charts/$(basename "$tar")" || { ok=false; failed="$failed $d:r2"; }
+              bash ./r2-cp.sh "$tar" "s3://$BUCKET/charts/$(basename "$tar")" || { ok=false; failed="$failed $d:r2"; }
               # the unpacked folder: a mirror of charts/mesh/<D>/ is a meshDir
               if $ok; then
                 tar --zstd -xf "$tar" -C work || { ok=false; failed="$failed $d:extract"; }
@@ -379,7 +382,7 @@ jobs:
             if $ok; then
               gh release upload "latest" --clobber "$json" || failed="$failed $d:release-json"
               if [ -n "$R2_ACCOUNT_ID" ]; then
-                aws s3 cp --endpoint-url "$ENDPOINT" --no-progress "$json" "s3://$BUCKET/charts/$(basename "$json")" || failed="$failed $d:r2-json"
+                bash ./r2-cp.sh "$json" "s3://$BUCKET/charts/$(basename "$json")" || failed="$failed $d:r2-json"
               fi
             else
               echo "::warning::$d: sidecar not published; the mesh stays marked stale and is rebuilt next run"
@@ -405,10 +408,10 @@ jobs:
           esac
           mkdir -p sidecars
           for key in $(aws s3 ls --endpoint-url "$ENDPOINT" "s3://$BUCKET/charts/" | awk '$4 ~ /_mesh\.json$/ {print $4}'); do
-            aws s3 cp --endpoint-url "$ENDPOINT" --no-progress "s3://$BUCKET/charts/$key" "sidecars/$key"
+            bash ./r2-cp.sh "s3://$BUCKET/charts/$key" "sidecars/$key"
           done
           python3 mesh-catalog.py --sidecars sidecars --public-url "$PUB/charts" -o index.json --check-urls
-          aws s3 cp --endpoint-url "$ENDPOINT" --no-progress index.json "s3://$BUCKET/charts/mesh/index.json"
+          bash ./r2-cp.sh index.json "s3://$BUCKET/charts/mesh/index.json"
 
       - name: Rewrite the release notes (charts and meshes)
         if: ${{ env.R2_ACCOUNT_ID != '' && env.R2_PUBLIC_URL != '' }}
@@ -439,6 +442,8 @@ jobs:
       GH_REPO: ${{ github.repository }}
       REF: ${{ github.ref_name }}
     steps:
+      - uses: actions/checkout@v7   # for r2-cp.sh
+
       - name: Stage each mesh to R2 charts-test/<branch>/
         env:
           NAMES: ${{ needs.prepare.outputs.names }}
@@ -470,8 +475,8 @@ jobs:
               continue
             fi
             ok=true
-            aws s3 cp --endpoint-url "$ENDPOINT" --no-progress "$tar" "s3://$BUCKET/$prefix/$(basename "$tar")" || ok=false
-            aws s3 cp --endpoint-url "$ENDPOINT" --no-progress "$json" "s3://$BUCKET/$prefix/$(basename "$json")" || ok=false
+            bash ./r2-cp.sh "$tar" "s3://$BUCKET/$prefix/$(basename "$tar")" || ok=false
+            bash ./r2-cp.sh "$json" "s3://$BUCKET/$prefix/$(basename "$json")" || ok=false
             tar --zstd -xf "$tar" -C work
             aws s3 sync --endpoint-url "$ENDPOINT" --no-progress --delete \
               "work/${d}_mesh" "s3://$BUCKET/$prefix/mesh/$d/" || ok=false

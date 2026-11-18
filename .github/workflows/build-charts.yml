@@ -344,16 +344,37 @@ jobs:
           BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           BUCKET="${BUCKET%/}"  # tolerate a trailing slash in the secret
-          files=$(find artifacts/ \( -name "*.mbtiles" -o -name "*.pmtiles" -o -name "*.json" \) -type f | sort)
+          # One district (one artifact folder) at a time: its chart files
+          # first, each copy tried again when it fails (r2-cp.sh), and its
+          # .json record last, only when every chart file landed. The record
+          # carries the build_date the mesh workflow compares, so it must
+          # never describe a chart that is not on R2 (2026-11-01: 13CGD's
+          # record was uploaded, then its .mbtiles failed).
           failed=""
-          for f in $files; do
-            name=$(basename "$f")
-            echo "R2: uploading $name ($(numfmt --to=iec $(stat -c%s "$f")))..."
-            if ! aws s3 cp --endpoint-url "$ENDPOINT" --no-progress \
-                "$f" "s3://$BUCKET/charts/$name"; then
-              echo "::warning::R2 upload failed for $name"
-              failed="$failed $name"
-            fi
+          for dir in $(find artifacts/ -mindepth 1 -maxdepth 1 -type d | sort); do
+            ok=true
+            for f in $(find "$dir" \( -name "*.mbtiles" -o -name "*.pmtiles" \) -type f | sort); do
+              name=$(basename "$f")
+              echo "R2: uploading $name ($(numfmt --to=iec $(stat -c%s "$f")))..."
+              if ! bash ./r2-cp.sh "$f" "s3://$BUCKET/charts/$name"; then
+                echo "::warning::R2 upload failed for $name"
+                failed="$failed $name"
+                ok=false
+              fi
+            done
+            for f in $(find "$dir" -name "*.json" -type f | sort); do
+              name=$(basename "$f")
+              if ! $ok; then
+                echo "::warning::$name not uploaded: a chart file of its district did not reach R2; the record there stays the previous build's"
+                failed="$failed $name"
+                continue
+              fi
+              echo "R2: uploading $name ($(numfmt --to=iec $(stat -c%s "$f")))..."
+              if ! bash ./r2-cp.sh "$f" "s3://$BUCKET/charts/$name"; then
+                echo "::warning::R2 upload failed for $name"
+                failed="$failed $name"
+              fi
+            done
           done
           echo "Objects now in R2:"
           aws s3 ls --endpoint-url "$ENDPOINT" "s3://$BUCKET/charts/" || true
@@ -403,6 +424,8 @@ jobs:
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
     steps:
+      - uses: actions/checkout@v7   # for r2-cp.sh
+
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
@@ -444,24 +467,41 @@ jobs:
           case "$BUCKET" in
             */*) PUB="$PUB/${BUCKET#*/}" ;;
           esac
-          files=$(find artifacts/ \( -name "*.mbtiles" -o -name "*.pmtiles" -o -name "*.json" \) -type f | sort)
           failed=""
           echo "R2 test prefix: s3://$BUCKET/$prefix/" | tee -a "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
-          for f in $files; do
-            name=$(basename "$f")
-            echo "R2: staging $name ($(numfmt --to=iec $(stat -c%s "$f")))..."
-            if aws s3 cp --endpoint-url "$ENDPOINT" --no-progress \
-                "$f" "s3://$BUCKET/$prefix/$name"; then
+          stage() {   # $1 = file; copies it under the test prefix and lists it
+            local name
+            name=$(basename "$1")
+            echo "R2: staging $name ($(numfmt --to=iec $(stat -c%s "$1")))..."
+            if bash ./r2-cp.sh "$1" "s3://$BUCKET/$prefix/$name"; then
               if [ -n "$PUB" ]; then
                 echo "- [$name]($PUB/$prefix/$name)" >> "$GITHUB_STEP_SUMMARY"
               else
                 echo "- $name" >> "$GITHUB_STEP_SUMMARY"
               fi
-            else
-              echo "::warning::R2 staging failed for $name"
-              failed="$failed $name"
+              return 0
             fi
+            echo "::warning::R2 staging failed for $name"
+            failed="$failed $name"
+            return 1
+          }
+          # As the release job: a district's chart files first, its .json
+          # record last and only when every chart file landed (a mesh test
+          # run on this branch reads the record's build_date).
+          for dir in $(find artifacts/ -mindepth 1 -maxdepth 1 -type d | sort); do
+            ok=true
+            for f in $(find "$dir" \( -name "*.mbtiles" -o -name "*.pmtiles" \) -type f | sort); do
+              stage "$f" || ok=false
+            done
+            for f in $(find "$dir" -name "*.json" -type f | sort); do
+              if $ok; then
+                stage "$f" || true
+              else
+                echo "::warning::$(basename "$f") not staged: a chart file of its district did not reach R2"
+                failed="$failed $(basename "$f")"
+              fi
+            done
           done
           if [ -n "$failed" ]; then
             echo "Failed R2 staging:$failed"
