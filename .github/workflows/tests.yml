@@ -29,6 +29,14 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      # The Python the mesh packages are pinned for (mesh/requirements.txt),
+      # as the mesh workflow sets it. Without this the job takes the runner's
+      # own Python: on ubuntu-26.04 that is 3.14, for which the pinned
+      # triangle has no build, so the install failed before any test ran
+      # (2026-11-18).
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - name: Install GDAL, pyyaml and the mesh packages (tests/test_mesh_pipeline.py)
         run: |
           sudo apt-get update -qq
