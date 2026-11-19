@@ -350,10 +350,21 @@ jobs:
           # carries the build_date the mesh workflow compares, so it must
           # never describe a chart that is not on R2 (2026-11-01: 13CGD's
           # record was uploaded, then its .mbtiles failed).
+          # The folders that hold chart files: one per artifact when the run
+          # built several districts (artifacts/<name>/), and artifacts/
+          # itself when it built one (download-artifact puts a single
+          # artifact's files there, with no folder of its own). Until
+          # 2026-11-19 this looked for sub-folders only, so a one-district
+          # run uploaded nothing to R2 and still succeeded (run 44546010825).
+          dirs=$(find artifacts/ \( -name "*.mbtiles" -o -name "*.pmtiles" -o -name "*.json" \) -type f -exec dirname {} \; | sort -u)
+          if [ -z "$dirs" ]; then
+            echo "::error::no chart files under artifacts/: nothing to upload to R2"
+            exit 1
+          fi
           failed=""
-          for dir in $(find artifacts/ -mindepth 1 -maxdepth 1 -type d | sort); do
+          for dir in $dirs; do
             ok=true
-            for f in $(find "$dir" \( -name "*.mbtiles" -o -name "*.pmtiles" \) -type f | sort); do
+            for f in $(find "$dir" -maxdepth 1 \( -name "*.mbtiles" -o -name "*.pmtiles" \) -type f | sort); do
               name=$(basename "$f")
               echo "R2: uploading $name ($(numfmt --to=iec $(stat -c%s "$f")))..."
               if ! bash ./r2-cp.sh "$f" "s3://$BUCKET/charts/$name"; then
@@ -362,7 +373,7 @@ jobs:
                 ok=false
               fi
             done
-            for f in $(find "$dir" -name "*.json" -type f | sort); do
+            for f in $(find "$dir" -maxdepth 1 -name "*.json" -type f | sort); do
               name=$(basename "$f")
               if ! $ok; then
                 echo "::warning::$name not uploaded: a chart file of its district did not reach R2; the record there stays the previous build's"
@@ -489,12 +500,19 @@ jobs:
           # As the release job: a district's chart files first, its .json
           # record last and only when every chart file landed (a mesh test
           # run on this branch reads the record's build_date).
-          for dir in $(find artifacts/ -mindepth 1 -maxdepth 1 -type d | sort); do
+          # The folders that hold chart files: artifacts/<name>/ for several
+          # districts, artifacts/ itself for one (see the release job).
+          dirs=$(find artifacts/ \( -name "*.mbtiles" -o -name "*.pmtiles" -o -name "*.json" \) -type f -exec dirname {} \; | sort -u)
+          if [ -z "$dirs" ]; then
+            echo "::error::no chart files under artifacts/: nothing to stage"
+            exit 1
+          fi
+          for dir in $dirs; do
             ok=true
-            for f in $(find "$dir" \( -name "*.mbtiles" -o -name "*.pmtiles" \) -type f | sort); do
+            for f in $(find "$dir" -maxdepth 1 \( -name "*.mbtiles" -o -name "*.pmtiles" \) -type f | sort); do
               stage "$f" || ok=false
             done
-            for f in $(find "$dir" -name "*.json" -type f | sort); do
+            for f in $(find "$dir" -maxdepth 1 -name "*.json" -type f | sort); do
               if $ok; then
                 stage "$f" || true
               else
