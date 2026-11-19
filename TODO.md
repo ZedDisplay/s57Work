@@ -55,9 +55,33 @@
   charts of 01, 05, 07, 08, 09, 14 and 17CGD are the 2026-11-01 build; 11CGD
   has the new `.mbtiles` and `.json` with the 2026-10-16 `.pmtiles`; 13CGD
   has the new `.json` and `.pmtiles` with the 2026-10-16 `.mbtiles`; every
-  `*_mesh.json` and `*_mesh.tar.zst` is of 2026-10-16. To decide: how the two
-  files get uploaded, and whether one failed upload should stop the meshes
-  of the districts whose charts did publish.
+  `*_mesh.json` and `*_mesh.tar.zst` is of 2026-10-16.
+
+  DONE 2026-11-18/19 (commits `0591a8b`, `4f7aba1`): each district's chart
+  files are uploaded before its `.json` record, the record only when they
+  landed; every single-file copy to or from R2 goes through `r2-cp.sh` (tried
+  again up to three times); the mesh workflow judges each district by its
+  record instead of stopping on the chart run's result; the test workflow's
+  end-to-end job runs on Python 3.12. Chart run 44357527549 (2026-11-18)
+  republished every district, 11CGD and 13CGD whole again; mesh run
+  44409617834 rebuilt and published all eight meshes and the catalogue
+  (records written 2026-11-19 02:11 to 02:57 UTC). Still one attempt: the
+  folder sync of an unpacked mesh (`aws s3 sync`), and the GitHub release
+  uploads.
+
+- **Mesh: record each tile's chart coverage, and measure the router's
+  "chartless tile" rule against it** (owner, 2026-11-19: measure it in the
+  mesh build; design first). The router treats a tile in which every triangle
+  has no depth as outside the charts (signalk-weather-router-plus
+  `src/engine/mesh/store.ts`, `scanNoChartTiles`). The owner's condition of
+  2026-10-12 is that this inference be measured against the charts' own
+  coverage before it is trusted. The build holds that coverage per tile while
+  it runs (`process_tile` in `mesh/build.py`: `higher`, the union of the
+  `M_COVR` `CATCOV` 1 outlines over the tile) and writes none of it. To
+  design: what is recorded per tile and where (the mesh's `index.json`, which
+  the router reads, or the sidecar), and the comparison the build reports for
+  every district (tiles with no depth anywhere against tiles with no chart
+  coverage). Nothing built until the design is agreed.
 
 - **Mesh: mark a fixed bridge or overhead cable that has no charted height**
   (2026-11-18). `clearance_of` in `mesh/build.py` returns no clearance for a

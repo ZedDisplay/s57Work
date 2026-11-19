@@ -330,13 +330,32 @@ gap_fills:
 
   - name: east_maine_offshore_band3
     description: >
-      US3EC11M is the band 3 offshore cell covering the Gulf of Maine
-      east of Mount Desert. It naturally renders only at z=11-12, but no
-      band 4 cell exists for the lat 44.75-44.80 strip — leaving holes
-      at z=13-16 in this offshore corridor. Filled at all zooms 9-16.
+      The band 3 cells covering the offshore Gulf of Maine. They
+      naturally render only at z=11-12, but no band 4 cell exists
+      offshore — leaving holes at z=13-16 (and, in the navigation mesh
+      built from z=16, open water with no charted depth). Filled at all
+      zooms 9-16.
+      Until 2026-11-19 this group named the legacy cell US3EC11M, which
+      NOAA cancelled; the build followed it to its successors only while
+      the cancelled cell's own file was still in NOAA's district zip.
+      On the 2026-11-18 build that lookup found nothing and the whole
+      fill was skipped without a word: 01CGD lost about half its z16
+      tiles (1,098,529 -> 541,624 read by the mesh build) and the mesh
+      its Gulf of Maine depths. The cells below are the ten successors
+      the 2026-11-01 build used, named directly, so the fill no longer
+      depends on a cancelled cell.
     zoom_range: [9, 16]
     cells:
-      - US3EC11M
+      - US3MA1BD
+      - US3MA1BE
+      - US3MA1BF
+      - US3MA1CD
+      - US3MA1CE
+      - US3MA1CF
+      - US3ME1AB
+      - US3ME1AC
+      - US3ME1BB
+      - US3ME1BC
 
   - name: east_maine_band2345_holes
     description: >
