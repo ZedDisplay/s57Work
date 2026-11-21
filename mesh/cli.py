@@ -5,7 +5,8 @@
 Runs the four stages of the experiment in order, with the same
 intermediate files, under the work directory (default data/mesh/<name>/):
 
-    z16_layers/<LAYER>.pkl        stage 1  decoded z16 tiles
+    z16_layers/<LAYER>.pkl        stage 1  decoded tiles: zoom 16, and coarser zooms where
+                                           zoom 16 has no chart coverage (mesh/decode.py)
     build[/<cluster>]/            stage 3  tile_*.npz, mesh_*.npz, parts.npz, summary.json
     final[/<cluster>]/            stage 4a finalized mesh_*.npz
     <out>/<name>_mesh/            stage 4b binary tiles + index.json (the plugin's meshDir)
@@ -26,7 +27,7 @@ Gating requirements are all of the experiment's checks except "7 angles
 >= 20 deg" and "2 layers loaded", which are reported as warnings, plus
 the finalize reverse-edge check, "15 chart coverage loaded" (M_COVR
 with CATCOV=1 in the decoded input, also when --reuse-decoded reads an
-old z16_layers/) and "no z16 tile failed to decode".
+old z16_layers/) and "no tile failed to decode".
 """
 import argparse
 import datetime as dt
@@ -142,11 +143,11 @@ def main(argv=None):
     pkl = os.path.join(work, "z16_layers")
     if a.reuse_decoded and os.path.isdir(pkl) and any(f.endswith(".pkl") for f in os.listdir(pkl)):
         log(f"stage 1: reusing decoded layers in {pkl}")
-        dec = {"tiles": None, "failed": [], "pieces": None, "reused": True}
+        dec = {"tiles": None, "by_zoom": None, "failed": [], "pieces": None, "reused": True}
     else:
         if os.path.isdir(pkl):
             shutil.rmtree(pkl)
-        log("stage 1: decoding z16 tiles")
+        log("stage 1: decoding the tiles (zoom 16, and coarser zooms where zoom 16 has no chart coverage)")
         dec = decode.decode_to_pickles(a.mbtiles, pkl, a.workers, log=log)
 
     # ---- stage 2: extent
@@ -249,7 +250,10 @@ def main(argv=None):
         "chart_build_date": build_dates[-1] if build_dates else None,
         "chart_metadata": chart_meta or None,
         "land_polygons": {"file": os.path.basename(a.land), "date": land_date(a.land)} if a.land else None,
-        "z16_tiles_decoded": dec["tiles"],
+        # Zoom 16 alone, as before 2026-11-21, so the figure compares across builds; every zoom is in the next key.
+        "z16_tiles_decoded": dec["by_zoom"].get(decode.ZOOM, 0) if dec["by_zoom"] is not None else None,
+        "tiles_decoded_by_zoom": ({str(z): n for z, n in dec["by_zoom"].items()}
+                                  if dec["by_zoom"] is not None else None),
         "z16_cells": len(cells),
         "clusters": results,
         "triangles": sum(r["triangles"] for r in results),

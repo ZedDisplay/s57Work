@@ -42,6 +42,28 @@
   routing decision. Nothing is changed until that design is agreed; the router
   stays as it is.
 
+  2026-11-21, case 1 settled on the chart file the mesh is built from
+  (`01CGD_ENCs.mbtiles` of 2026-11-19, sha256 `ebf80549…e63ccc`, the file the
+  published mesh's sidecar names) and fixed in the build, with the owner's go.
+  At 42.6382, −69.7644 and 40.3798, −72.0945 the file has the band 3 depth
+  area at z14 (237.7 m, 54.8 m) and no tile at z15 or z16; the chart build
+  renders band 3 to z14 only (`BAND_ZOOM` + `BAND_ZOOM_EXTENSION`). The build
+  now reads the most detailed zoom at which the chart covers a spot
+  (`mesh/decode.py`; `docs/MESH.md`, "Differences from the experiment"). On
+  01CGD, whole district built locally, every gating check passed: water
+  without a depth 50,479 km² of 252,237 km², of which 12 km² inside chart
+  coverage (case 3, unsurveyed: 8 km²; depth areas with no value: 3 km²) and
+  the rest case 2, water no chart covers. The CAUTION above compared the mesh
+  with chart data of another build and is not pursued further.
+
+  Still owed: the other seven districts are not built with the change (07 and
+  14 are in several clusters); nothing is published until the mesh workflow
+  runs with it; the tile format still cannot say which case a triangle is.
+  The owner's decision of 2026-11-21 (the plugin's `docs/decisions.md`):
+  inside the US chart mesh a route does not cross water with no charted
+  depth; that is a router change, design first, and it needs an answer for
+  case 2 inside a tile that also has charted water.
+
 - **Meshes were not rebuilt with the 2026-11-01 charts** (found 2026-11-18).
   The scheduled chart run of 2026-11-01 (run 41263914244) built all nine
   districts. In its `release` job the step "Upload to Cloudflare R2" failed

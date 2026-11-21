@@ -4,7 +4,8 @@ unchanged, the District 1 box, the output/land paths and the env knobs
 became `configure()` parameters).
 
 Inputs
-  pkl        decoded z16 MBTiles layers (mesh.decode)       -- or --
+  pkl        decoded MBTiles layers (mesh.decode: zoom 16, and coarser
+             zooms where zoom 16 has no chart coverage)     -- or --
   data       merged S-57 GeoJSON, one directory per source (bands + gap
              fills), with `priority` naming the sources finest first
   land       OSM land_polygons.shp (the land mask the old grid also used),
@@ -32,8 +33,10 @@ Layers (every class the old grid/tile checks use, plus structures):
   zones       FAIRWY, TSSLPT (ORIENT), TSEZNE, RESARE (RESTRN codes), M_QUAL
               (CATZOC), RECTRC/NAVLNE (lines as 5 m corridors)
 Source priority (GeoJSON input only): each source is cut by the M_COVR
-(CATCOV=1) coverage of every higher one. The z16 input is one source
-with finer-wins already resolved by the chart build.
+(CATCOV=1) coverage of every higher one. The decoded MBTiles input is
+one source with finer-wins already resolved: by the chart build within a
+zoom, and by mesh.decode between zooms (a coarser tile is read only
+where no deeper tile's coverage reaches).
 
 Per 0.25 deg tile (processed with a 100 m overlap, then cropped):
   1 band merge, 2 boundaries, 3 node+faces (snap-rounded 1e-7), 4 classify +
@@ -945,6 +948,26 @@ def split_segments_through_vertices(tp, moved):
     return n_split
 
 
+def tile_index(cen, box_, tile, k):
+    """The tile (column, row) each triangle is filed under, from its
+    centroid `cen` (x = lon * k, y = lat), held inside the rectangle's
+    tile grid on all four sides.
+
+    The mesh's vertices are snapped to the GS grid, so its outline lies up
+    to half a grid step outside the rectangle, and a triangle thin enough
+    against that outline has its centroid outside too. The west and south
+    sides were always held at 0; the east and north sides were not, and
+    on 2026-11-20 two triangles of 0.087 and 0.027 m2 against 01CGD's east
+    edge (centroids 1e-7 and 6e-7 degrees past it, in tile 35,2) were
+    filed under column 36 of 36, a tile with no file: the split stopped
+    there. They belong to the last column, the tile their part came from."""
+    nx = math.ceil((box_[2] - box_[0]) / tile)
+    ny = math.ceil((box_[3] - box_[1]) / tile)
+    ti = np.clip(np.floor((cen[:, 0] / k - box_[0]) / tile).astype(int), 0, nx - 1)
+    tj = np.clip(np.floor((cen[:, 1] - box_[1]) / tile).astype(int), 0, ny - 1)
+    return ti, tj
+
+
 RSS_UNIT = 2**20 if sys.platform == "darwin" else 1024   # ru_maxrss: bytes on macOS, kB on Linux
 
 
@@ -1220,8 +1243,7 @@ def run_global(workers, log=print, handoff=None):
     # with the routing data: neighbours, shore and depth penalties per triangle
     t5 = time.time()
     cen = V[T].mean(axis=1)
-    ti = np.clip(np.floor((cen[:, 0] / K - BOX[0]) / TILE).astype(int), 0, None)
-    tj = np.clip(np.floor((cen[:, 1] - BOX[1]) / TILE).astype(int), 0, None)
+    ti, tj = tile_index(cen, BOX, TILE, K)
     order = np.lexsort((tj, ti))
     part_tile_a = np.array(part_tile); part_local_a = np.array(part_local)
     LAB_CACHE = {}

@@ -60,6 +60,22 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rebuilds nothing. `.github/workflows/tests.yml` runs it on every push.
 
 ### Fixed
+- Navigation mesh: open water whose finest chart is a coastal-band cell
+  had no depth, hazard or sounding. The mesh build read the chart file's
+  z16 tiles only, and the chart build renders band 3 to z14 and band 2 to
+  z12. `mesh/decode.py` now reads, for every spot, the most detailed zoom
+  at which the chart covers it (every z16 tile, then each coarser tile
+  over the part no deeper tile's `M_COVR` coverage fills), keeping only
+  area pieces when an area is cut. 01CGD: water with a depth 201,758 km²
+  of 252,237 km²; what is left without one is water no chart covers, bar
+  12 km². About 5 % more triangles (44,369,047 against 42,217,242). The
+  mesh rectangle, the tile format and `index.json` are unchanged; the
+  sidecar gains `tiles_decoded_by_zoom`. `docs/MESH.md`,
+  `tests/test_mesh_decode.py`.
+- Navigation mesh: the split into tile files stopped on a missing tile
+  when a triangle's centroid fell just past the rectangle's east or north
+  edge (the mesh outline is snapped to the 0.5 m grid and can lie half a
+  step outside). `tile_index` holds the tile index on all four sides.
 - `count-layer-by-zoom.py`: a bbox reaching a pole (S=-90) raised a math
   domain error; latitude is clamped to the Web Mercator limit first.
   zlib-wrapped tiles were only recognised with the default 32 KB window

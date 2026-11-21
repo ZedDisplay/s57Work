@@ -14,12 +14,18 @@ ones that were hard-coded for District 1, and each is listed at the end.
 
 ## Inputs
 
-- A finished chart `.mbtiles` (the published district file). Only its
-  z16 tiles are read, decoded exactly as the old routing grid read them,
-  so the mesh is built from what the chart publishes, with finer-wins
-  already resolved by the chart build. Several files may be given; each
-  is a separate source and the last obstruction or dredged area of a
-  tile wins within a source.
+- A finished chart `.mbtiles` (the published district file), decoded as
+  the old routing grid read its tiles, so the mesh is built from what
+  the chart publishes, with finer-wins already resolved by the chart
+  build. For every spot the most detailed zoom at which the chart covers
+  it is read: every z16 tile, whole, then z15, z14, … each tile only over
+  the part that no deeper tile's coverage (`M_COVR`, CATCOV 1, as carried
+  in the tiles) fills. The chart build renders a coastal-band cell to z14
+  and a general-band cell to z12; only approach and harbour cells and the
+  gap fills reach z16, so z16 alone (the rule until 2026-11-21) left the
+  water whose finest chart is band 3 with no depth, hazard or sounding.
+  Several files may be given; each is a separate source and the last
+  obstruction or dredged area of a tile wins within a source.
 - The OSM land polygons, `land_polygons.shp` from the
   [osmdata.openstreetmap.de split package](https://osmdata.openstreetmap.de/data/land-polygons.html)
   (`land-polygons-split-4326.zip`, ~700 MB). The data date is read from
@@ -38,7 +44,7 @@ Under the work directory (`data/mesh/<name>/`, `--work`):
 
 | Stage | Module | Writes |
 |---|---|---|
-| 1 decode | `mesh/decode.py` | `z16_layers/<LAYER>.pkl`: per layer, a list of (WKB, properties) pieces clipped to their z16 tile, with `__src` and `__ord` |
+| 1 decode | `mesh/decode.py` | `z16_layers/<LAYER>.pkl` (the folder keeps the experiment's name): per layer, a list of (WKB, properties) pieces clipped to the part of their tile they were read for (a z16 tile whole; a coarser tile where no deeper zoom has coverage), with `__src` and `__ord` |
 | 2 extent | `mesh/extent.py` | nothing; the rectangle(s) to mesh, see below |
 | 3a tiles | `mesh/build.py` `run_tiles` | `build/tile_III_JJJ.npz` (faces, labels, PSLG, medial axis, shore grid), `build/tiles.json` (per-tile results, timings, seam vertices, layer counts: the handoff to 3b), `build/progress_<pid>.log` |
 | 3b global | `mesh/build.py` `run_global` | `build/mesh_III_JJJ.npz` (triangles after the global refinement, neighbours, penalties), `build/parts.npz`, `build/summary.json` |
@@ -84,7 +90,8 @@ In the output directory (`-o`, default `data/tiles/`):
   ignores bit 7 routes through an opening bridge as if it stood open.
 - `<name>_mesh.json` — the sidecar: sources with size and SHA-256, the
   chart's `build_date` when `--chart-json` is given, land polygon date,
-  z16 tile and cell counts, each cluster's box, counts, timings, peak
+  z16 tile and cell counts (`z16_tiles_decoded`, `z16_cells`), the tiles
+  read at every zoom (`tiles_decoded_by_zoom`), each cluster's box, counts, timings, peak
   RSS and the full requirement list with PASS/FAIL and detail, gating
   failures, warnings, `passed`.
 - `<name>_mesh.tar.zst` with `--archive`.
@@ -94,7 +101,9 @@ In the output directory (`-o`, default `data/tiles/`):
 The rectangle around every 0.25° cell that holds a z16 tile of the
 input. Every tile of the rectangle is processed, as the experiment
 processed every tile of its District 1 box; a tile without chart data
-meshes as open water of unknown depth. For 01CGD this is 36 × 23 = 828
+meshes as open water of unknown depth. The rectangle is still drawn from
+the z16 tiles alone: the coarser zooms fill in depths inside it and do
+not widen it. For 01CGD this is 36 × 23 = 828
 tiles of which 499 hold z16 data (the experiment's box had 704).
 
 The cells are counted from −180° + 0.000125°, −90° + 0.000125°, half a
@@ -142,7 +151,7 @@ to the sidecar. All of them gate except two:
 | 9, 10, 11 | medial axis step, hazard columns, time measured | yes (always pass) |
 
 Plus two more that gate: the finalize step's reverse-edge check, and
-"no z16 tile failed to decode" (a tile that does not decode drops its
+"no tile failed to decode" (a tile that does not decode drops its
 hazards, depth areas and land silently, and no later check can see
 that). Exit 0 when all gating checks pass, 2 when one fails (the
 outputs and the intermediates are left in place for diagnosis;
@@ -330,6 +339,43 @@ experiment as it was.
   keeping the segment's part; the seam line reports the count. With the
   fix the 8 × 8 New York block refines to 9.30 M triangles in 64 s at
   1.8 GB, ratio 1.00 to the per-tile sum (`tests/test_mesh_weld.py`).
+- **The most detailed covering zoom, not z16 alone** (2026-11-21): the
+  experiment read z16 tiles only, with no fallback. The chart build
+  renders band 3 to z14 and band 2 to z12, so water whose finest chart is
+  band 3 had no z16 tile and meshed as water of unknown depth although
+  the chart file holds its depth areas: 01CGD of 2026-11-19 has a 237.7 m
+  depth area at 42.6382, −69.7644 at z14 and no tile there at z15 or
+  z16, and 143,753 km² of its tile area lies under a z14 tile that holds
+  depth areas but has no z16 tile. `mesh/decode.py` now reads, after
+  every z16 tile, each coarser tile over the part no deeper tile's
+  coverage fills. Two things it had to get right, both measured on 01CGD:
+  it goes by the chart's coverage in the tiles, not by whether a deeper
+  tile exists (a z16 tile at a chart's edge exists but is covered only in
+  part; a first version left the rest empty, a strip one tile wide along
+  chart edges that cut 72,693 km² of water with a depth off from the rest
+  once water without a depth was closed); and an area cut by that part
+  keeps only its area pieces (a line left where the two merely touch
+  makes the rejoined feature a mixed collection, which stage 3 drops
+  whole: 0.3° blocks of `LNDARE` and `DEPARE` went that way). Result on
+  01CGD, the whole district built on a 16 GB Mac, every gating check
+  passed: 44,369,047 triangles in 539 tiles (42,217,242 in 538 before);
+  water with a depth 201,758 km² of 252,237 km²; of the 50,479 km²
+  without one, 12 km² lies inside chart coverage (8 km² unsurveyed,
+  3 km² depth areas with no value) and the rest is water no chart
+  covers; with water without a depth closed, 4.7 km² of water with a
+  depth is separated from the main body. The extent rule is unchanged.
+  `tests/test_mesh_decode.py`.
+- **A triangle past the east or north edge** (2026-11-21): the split into
+  tile files filed a triangle under the tile its centroid falls in, held
+  at column and row 0 on the west and south sides only. The mesh's
+  vertices are snapped to the 0.5 m grid, so its outline lies up to half
+  a grid step outside the rectangle; two triangles of 0.087 and 0.027 m²
+  against 01CGD's east edge had centroids 1e-7 and 6e-7 degrees past it
+  and were filed under column 36 of 36, and the split stopped on the
+  missing tile file. `tile_index` (`mesh/build.py`) holds the index on
+  all four sides. The published builds have the same outline and never
+  had a triangle that thin there; the coarser zooms brought a depth
+  contour to that edge.
 - **Not ported**: the experiment's Python routers, grid comparison and
   live-API timing scripts, and the funnel test. Router parity against
   the saved trips is the plugin repository's test.
