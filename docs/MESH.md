@@ -26,6 +26,19 @@ ones that were hard-coded for District 1, and each is listed at the end.
   water whose finest chart is band 3 with no depth, hazard or sounding.
   Several files may be given; each is a separate source and the last
   obstruction or dredged area of a tile wins within a source.
+- NOAA's ENC product catalogue, `ENCProdCat_19115.xml`
+  (<https://charts.noaa.gov/ENCs/ENCProdCat_19115.xml>, ~50 MB, the file
+  the chart build reads for replacement cells), with `--catalog`. It
+  lists every live chart cell of every district with its outline. A
+  coarser zoom of the chart is not read inside the outline of a cell
+  that the chart build renders deeper than that zoom
+  (`band_ceilings`, from the chart build's own zoom table): a district's
+  file holds coarse cells that reach into the next district's water,
+  and there the next district's mesh, built from the finer cells, is the
+  one that speaks. That water stays water of unknown depth in this mesh.
+  `--no-catalog` reads coarser zooms by the file's own coverage alone
+  and exists for a chart file whose water no other file charts and for
+  the tests; one of the two must be given, there is no default.
 - The OSM land polygons, `land_polygons.shp` from the
   [osmdata.openstreetmap.de split package](https://osmdata.openstreetmap.de/data/land-polygons.html)
   (`land-polygons-split-4326.zip`, ~700 MB). The data date is read from
@@ -91,7 +104,10 @@ In the output directory (`-o`, default `data/tiles/`):
 - `<name>_mesh.json` — the sidecar: sources with size and SHA-256, the
   chart's `build_date` when `--chart-json` is given, land polygon date,
   z16 tile and cell counts (`z16_tiles_decoded`, `z16_cells`), the tiles
-  read at every zoom (`tiles_decoded_by_zoom`), each cluster's box, counts, timings, peak
+  read at every zoom (`tiles_decoded_by_zoom`), the catalogue used
+  (`catalog`: file, size, SHA-256, cell outlines; null with
+  `--no-catalog`) and the coarser tiles left whole to a finer chart of
+  another file (`tiles_left_to_finer_charts`), each cluster's box, counts, timings, peak
   RSS and the full requirement list with PASS/FAIL and detail, gating
   failures, warnings, `passed`.
 - `<name>_mesh.tar.zst` with `--archive`.
@@ -163,10 +179,12 @@ outputs and the intermediates are left in place for diagnosis;
 pip install -r mesh/requirements.txt     # numpy scipy shapely mapbox-vector-tile pyshp triangle
 ./build-mesh.py data/tiles/01CGD_ENCs.mbtiles \
     --land /path/to/land-polygons-split-4326/land_polygons.shp \
+    --catalog data/ENCProdCat_19115.xml \
     -o data/tiles -j 7 --archive
 ```
 
-Options: `--name` (default: the input's stem without `_ENCs`),
+Options: `--catalog XML` or `--no-catalog` (one is required, see
+Inputs), `--name` (default: the input's stem without `_ENCs`),
 `--work`, `-j/--workers`, `--reuse-decoded` (skip stage 1 when the
 pickles exist), `--box W,S,E,N` (diagnostic: mesh this rectangle
 instead of the derived one), `--snap-discs` (move disc corners within 2 m of another
@@ -193,7 +211,8 @@ rebuilds regardless; a named `builds` list restricts the set.
 Each district is one matrix job on the runner named by `mesh.runner`
 with `mesh.workers` tile workers: install the packages, restore or
 download the land polygons (cached per calendar month), download the
-chart from R2, run `build-mesh.py --archive --chart-json`, upload
+chart from R2 and NOAA's product catalogue (fresh each run), run
+`build-mesh.py --archive --chart-json --catalog`, upload
 `<D>_mesh.tar.zst` and `<D>_mesh.json` as the run artifact. A gating
 failure fails the job and nothing of that district is published.
 
@@ -365,6 +384,34 @@ experiment as it was.
   covers; with water without a depth closed, 4.7 km² of water with a
   depth is separated from the main body. The extent rule is unchanged.
   `tests/test_mesh_decode.py`.
+- **Not where a finer chart exists in another district's file**
+  (2026-11-22). The meshes published on 2026-11-21 read a coarser zoom
+  wherever their own file had no finer coverage. A district's file also
+  holds coarse cells that reach into the next district's water, and
+  there the coarse chart contradicted the detailed one: 01CGD's coastal
+  cell draws the New Jersey shore as one depth area of 0 to 18.2 m and
+  Barnegat Bay and the Shark River as land. A depth area's shallow end
+  is the mesh's depth, so in the tile −74.25..−74.0, 39.75..40.0 the
+  01CGD mesh had 274.1 km² at 0.0 m where the 05CGD mesh has for example
+  9.1 m (39.84592, −74.03921), and closed to a boat needing 2.5 m
+  144.4 km² that the 05CGD mesh allows; over the district the water at
+  0.0 m had grown from 2,466 to 2,923 km². Now a coarser tile is also
+  trimmed by the outlines, from NOAA's product catalogue, of every live
+  cell of any district that the chart build renders deeper than that
+  tile (`read_catalog_cells`, `band_ceilings`, `FinerElsewhere` in
+  `mesh/decode.py`; `--catalog`). Result on 01CGD, whole district built
+  locally, every gating check passed: that New Jersey tile is as it was
+  before 2026-11-21 (327.9 km² of water, none with a depth from this
+  mesh, nothing closed that 05CGD allows); water at 0.0 m 2,477 km²;
+  water with a depth 200,069 km² of 252,243 km² (1,695 km² less than
+  without the rule, one block off New Jersey); the open-water depths
+  are kept (237.7 m at 42.6382, −69.7644; 54.8 m at 40.3798, −72.0945).
+  Where only a coarse chart exists at all, a foreign shore for example,
+  its wide depth areas stay, and a band that starts at 0 m closes that
+  water to the router. The cell outlines include this file's own cells;
+  where one has no data in part of its outline that part gets no coarser
+  chart either (not measurable on 01CGD: the totals outside the New
+  Jersey block match).
 - **A triangle past the east or north edge** (2026-11-21): the split into
   tile files filed a triangle under the tile its centroid falls in, held
   at column and row 0 on the west and south sides only. The mesh's

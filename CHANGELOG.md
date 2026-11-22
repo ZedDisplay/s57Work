@@ -72,6 +72,19 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mesh rectangle, the tile format and `index.json` are unchanged; the
   sidecar gains `tiles_decoded_by_zoom`. `docs/MESH.md`,
   `tests/test_mesh_decode.py`.
+- Navigation mesh: the meshes published on 2026-11-21 let a district's
+  coarse cells describe water that the next district's file charts in
+  finer cells. 01CGD's coastal cell draws the New Jersey shore as one
+  depth area of 0 to 18.2 m, so the 01CGD mesh closed to a 2.5 m boat
+  144 km² in one tile that the 05CGD mesh, from the detailed charts,
+  allows. A coarser zoom is now read only where no chart cell of any
+  district is rendered deeper: `build-mesh.py --catalog
+  ENCProdCat_19115.xml` (NOAA's product catalogue; the mesh workflow
+  downloads it), with the zoom each band is rendered to taken from the
+  chart build's own table. `--catalog` or `--no-catalog` must be given.
+  The sidecar gains `catalog` and `tiles_left_to_finer_charts`. 01CGD
+  rebuilt locally: the New Jersey tile is as it was before, the
+  open-water depths are kept. `docs/MESH.md`.
 - Navigation mesh: the split into tile files stopped on a missing tile
   when a triangle's centroid fell just past the rectangle's east or north
   edge (the mesh outline is snapped to the 0.5 m grid and can lie half a

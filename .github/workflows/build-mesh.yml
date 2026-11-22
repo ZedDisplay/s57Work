@@ -263,6 +263,19 @@ jobs:
           ls -lh chart/
           python3 -c "import json,os; m=json.load(open('chart/%s.json' % os.environ['STEM'])); print('chart build_date', m.get('build_date'), 'bounds', m.get('bounds'))"
 
+      # NOAA's list of every chart cell with its outline (~50 MB), the file
+      # the chart build reads for replacement cells. The mesh build keeps a
+      # district's coarse cells out of water that another district's file
+      # charts in finer cells (mesh/decode.py); without it the 2026-11-21
+      # meshes closed water off New Jersey that the next district charts as
+      # 9 m deep. Fetched fresh each run: the cells change as NOAA reschemes.
+      - name: Download NOAA's ENC product catalogue
+        run: |
+          mkdir -p catalog
+          curl -fSL --retry 3 --retry-delay 10 -o catalog/ENCProdCat_19115.xml \
+            https://charts.noaa.gov/ENCs/ENCProdCat_19115.xml
+          ls -l catalog/
+
       - name: Build the mesh
         env:
           DISTRICT: ${{ matrix.district.district }}
@@ -274,6 +287,7 @@ jobs:
           set +e
           python3 build-mesh.py "chart/$STEM.mbtiles" \
             --land "$shp" \
+            --catalog catalog/ENCProdCat_19115.xml \
             --name "$DISTRICT" \
             --chart-json "chart/$STEM.json" \
             -o out -j "$WORKERS" --archive

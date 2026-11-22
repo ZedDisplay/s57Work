@@ -56,9 +56,28 @@
   the rest case 2, water no chart covers. The CAUTION above compared the mesh
   with chart data of another build and is not pursued further.
 
-  Still owed: the other seven districts are not built with the change (07 and
-  14 are in several clusters); nothing is published until the mesh workflow
-  runs with it; the tile format still cannot say which case a triangle is.
+  2026-11-21/22: the change was committed (`3a8907b`) and all eight meshes
+  were rebuilt and published (mesh run 44935827546), every gating check
+  passed. A review of the published files then found a fault the checks do
+  not see: a district's coarse cells described the next district's water
+  (01CGD over the New Jersey shore: 274 km² at 0.0 m in one tile where 05CGD
+  has 9.1 m). Corrected in the build: a coarser zoom is read only where no
+  chart cell of any district is rendered deeper, from NOAA's product
+  catalogue (`--catalog`; `docs/MESH.md`). 01CGD rebuilt locally with it and
+  compared with the 05CGD mesh over that tile. THE PUBLISHED MESHES OF
+  2026-11-21 STILL CARRY THE FAULT until the mesh workflow is run again.
+
+  Seen in that review and not looked into: 09CGD gained 75 mesh tiles along
+  the Canadian shores of Lakes Superior and Huron; 05CGD lost the tile around
+  −74.625, 39.625 (1,658 triangles before); 12 km² more water closed to a
+  2 m boat in 01CGD than on 2026-11-19; the thin-triangle warning in 01CGD
+  rose from 152,556 to 181,102; the GitHub release's `08CGD_ENCs.mbtiles`
+  is dated 2026-08-01 while its `.json` is of 2026-11-18.
+
+  Still owed: only 01CGD is built with the corrected rule (07CGD was built
+  with the first version, both clusters passing); a route with two
+  neighbouring districts' meshes installed is not tested; the tile format
+  still cannot say which case a triangle is.
   The owner's decision of 2026-11-21 (the plugin's `docs/decisions.md`):
   inside the US chart mesh a route does not cross water with no charted
   depth; that is a router change, design first, and it needs an answer for

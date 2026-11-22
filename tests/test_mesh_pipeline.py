@@ -55,7 +55,7 @@ class MeshPipeline(unittest.TestCase):
         cls.meshwork = cls.work / "meshwork"
         cls.proc = subprocess.run(
             [sys.executable, str(h.ROOT / "build-mesh.py"), str(cls.mbtiles),
-             "--land", str(LAND), "-o", str(cls.out), "--name", "MINI", "--work", str(cls.meshwork),
+             "--land", str(LAND), "--no-catalog", "-o", str(cls.out), "--name", "MINI", "--work", str(cls.meshwork),
              "-j", "2", "--keep-intermediate", "--archive"],
             cwd=h.ROOT, capture_output=True, text=True)
         side = cls.out / "MINI_mesh.json"

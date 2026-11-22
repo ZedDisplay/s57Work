@@ -12,8 +12,9 @@ which the chart covers the spot.
 
   * every zoom-16 tile, whole, as before;
   * then zoom 15, 14, ... down to the file's lowest: each tile only over
-    the part of it that no deeper tile's coverage already fills. Coverage
-    is the chart's own M_COVR with CATCOV=1, as carried in the tiles.
+    the part of it that no deeper tile's coverage already fills (coverage
+    is the chart's own M_COVR with CATCOV=1, as carried in the tiles), and
+    that no finer chart of another district's file covers (below).
 
 Why: the chart build renders a coastal-band (band 3) cell to zoom 14 and
 a general-band cell to zoom 12 (s57-to-mbtiles.py BAND_ZOOM plus
@@ -28,6 +29,22 @@ chart's edge exists but the chart covers only part of it; going by the
 tile's existence left the rest of it empty, a strip one tile wide along
 chart edges (measured at -69.9, 42.625 on the same file).
 
+And only where no finer chart exists in ANY district's file (2026-11-22).
+A district's file holds coarse cells that reach into the next district's
+water, which that district's own file charts in detail. Read there, the
+coarse chart overrode nothing in this file but said things the detailed
+chart contradicts: 01CGD's coastal cell draws the New Jersey shore as one
+depth area of 0 to 18.2 m and Barnegat Bay as land, so the 01CGD mesh
+published on 2026-11-21 had 274 km2 at 0.0 m in one tile where 05CGD's
+mesh has 9.1 m, closing to a 2.5 m boat 144 km2 that 05CGD's mesh allows.
+So a coarser tile is also trimmed by the outlines of every live chart
+cell, of any district, that the chart build renders deeper than that
+tile: NOAA's ENC product catalogue lists the cells with their outlines
+(`read_catalog_cells`), and the chart build's own zoom table says how
+deep each band is rendered (`band_ceilings`). That water stays as it was
+before: water of unknown depth in this mesh, charted by the mesh of the
+district that has the finer cell.
+
 Several MBTiles sources are decoded independently. Each piece keeps its
 source ("__src") and its position in the tile ("__ord"): within one
 source a dredged area replaces the depth and the LAST obstruction wins,
@@ -38,10 +55,12 @@ tuples — the same files the experiment wrote to data/z16_layers/ (the
 folder keeps that name).
 """
 import gzip
+import importlib.util
 import json
 import math
 import os
 import pickle
+import re
 import sqlite3
 import time
 from multiprocessing import get_context
@@ -175,6 +194,70 @@ def _decode(task):
     return out
 
 
+def band_ceilings(minzoom, maxzoom):
+    """{usage band: the deepest zoom the chart build renders a cell of that band at}, for a chart file of zooms
+    minzoom..maxzoom, from the chart build's own table (s57-to-mbtiles.py BAND_ZOOM and band_render_range), so the
+    two cannot drift apart. A band the chart build does not render at all (band 6 with maxzoom 16) is left out:
+    no file holds it, so it is not a finer chart anywhere."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "s57-to-mbtiles.py")
+    spec = importlib.util.spec_from_file_location("s57_to_mbtiles", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    out = {}
+    for band in mod.BAND_ZOOM:
+        lo, hi = mod.band_render_range(band, minzoom, maxzoom)
+        if lo <= hi:
+            out[band] = hi
+    return out
+
+
+def read_catalog_cells(path):
+    """[(cell name, usage band, outline)] of every live cell in NOAA's ENC product catalogue
+    (ENCProdCat_19115.xml, the file the chart build reads for replacement cells). A cancelled cell stays listed
+    but carries no outline and drops out. A cell with several outline polygons gives one entry per polygon."""
+    with open(path, encoding="utf-8", errors="ignore") as fh:
+        text = fh.read()
+    out = []
+    for m in re.finditer(r"<title>\s*<gco:CharacterString>(US\d[A-Z0-9]{5})</gco:CharacterString>", text):
+        name = m.group(1).upper()
+        end = text.find("</MD_DataIdentification>", m.start())
+        blk = text[m.start():end if end > 0 else m.start() + 20000]
+        for pm in re.finditer(r"<gml:Polygon.*?</gml:Polygon>", blk, re.S):
+            # gml:pos is "latitude longitude"
+            pts = [tuple(map(float, q.split())) for q in re.findall(r"<gml:pos>([^<]*)</gml:pos>", pm.group(0))]
+            if len(pts) < 4:
+                continue
+            g = shapely.make_valid(shapely.Polygon([(lon, lat) for lat, lon in pts]))
+            if not g.is_empty:
+                out.append((name, int(name[2]), g))
+    return out
+
+
+class FinerElsewhere:
+    """Where a finer chart exists, in this file or any other district's: for a tile of zoom z, the outlines of
+    the cells the chart build renders deeper than z. `cells` as read_catalog_cells returns them; `ceilings` as
+    band_ceilings returns them."""
+
+    def __init__(self, cells, ceilings):
+        self.trees = {}
+        for z in range(ZOOM):
+            polys = [g for _, band, g in cells if ceilings.get(band, -1) > z]
+            if polys:
+                self.trees[z] = (polys, shapely.STRtree(polys))
+
+    def over(self, z, tile_box):
+        """The part of `tile_box` (a tile of zoom z) inside such an outline, or None."""
+        t = self.trees.get(z)
+        if t is None:
+            return None
+        polys, tree = t
+        idx = tree.query(tile_box, predicate="intersects")
+        if not len(idx):
+            return None
+        g = shapely.intersection(shapely.union_all([polys[k] for k in idx]), tile_box)
+        return None if g.is_empty else g
+
+
 def covered_below(z, x, y, below):
     """What the deeper zooms cover under tile (z, x, y): None, FULL, or a geometry. `below` is the coverage table
     of zoom z + 1: {(column, row_tms): FULL or geometry}."""
@@ -188,13 +271,17 @@ def covered_below(z, x, y, below):
                               for k, g in zip(kids, got) if g is not None])
 
 
-def decode_to_pickles(mbtiles_paths, out_dir, workers, log=print):
+def decode_to_pickles(mbtiles_paths, out_dir, workers, log=print, catalog_cells=None):
     """Decode the inputs into OUT/<LAYER>.pkl, the most detailed covering zoom first (the module's comment).
-    Returns {"tiles": n, "by_zoom": {zoom: n}, "failed": [...], "pieces": {layer: n}}."""
+    `catalog_cells` (read_catalog_cells): the live chart cells of every district; a coarser tile is not read where
+    one of them is rendered deeper. None: this file's own coverage alone decides (a chart file whose water no
+    other file charts, and the tests' hand-made files).
+    Returns {"tiles": n, "by_zoom": {zoom: n}, "failed": [...], "pieces": {layer: n}, "left_to_finer": n}."""
     os.makedirs(out_dir, exist_ok=True)
     t0 = time.time()
     acc, failed, by_zoom = {}, [], {}
     n_tiles = 0
+    left_to_finer = 0
 
     def take(res, cov_out):
         nonlocal n_tiles
@@ -239,6 +326,12 @@ def decode_to_pickles(mbtiles_paths, out_dir, workers, log=print):
             n0 = tile_bounds_xyz(ZOOM, 0, (n16 - 1) - max(ys))[3] + REACH_DEG
             # The coverage table of the zoom just read, deeper zooms included: {(column, row): FULL or geometry}.
             below = {k: (v if isinstance(v, str) else shapely.from_wkb(v)) for k, v in cov.items() if v is not None}
+            finer = None
+            if catalog_cells is not None:
+                ceilings = band_ceilings(min(zooms), ZOOM)
+                finer = FinerElsewhere(catalog_cells, ceilings)
+                log(f"catalogue: {len(catalog_cells):,} cell outlines; a band's deepest rendered zoom: "
+                    + ", ".join(f"band {b} z{c}" for b, c in sorted(ceilings.items())))
             log(f"zoom {ZOOM}: {len(cov):,} tiles; the chart's coverage fills the tile in "
                 f"{sum(1 for v in below.values() if isinstance(v, str)):,}, part of it in "
                 f"{sum(1 for v in below.values() if not isinstance(v, str)):,}, none of it in {len(cov) - len(below):,}")
@@ -247,6 +340,7 @@ def decode_to_pickles(mbtiles_paths, out_dir, workers, log=print):
                 table = {}                 # this zoom's coverage table, built as `below` was
                 plan = []                  # (column, row, region wkb or None) of the tiles to read
                 filled = 0
+                elsewhere = 0              # tiles whose whole remaining part a finer chart of another file has
                 for (x, y) in {(bx >> 1, by >> 1) for bx, by in below} | have.get(z, set()):
                     d = covered_below(z, x, y, below)
                     if d is not None:
@@ -259,15 +353,19 @@ def decode_to_pickles(mbtiles_paths, out_dir, workers, log=print):
                     if isinstance(d, str):
                         filled += 1
                         continue
-                    if d is None:
-                        plan.append((x, y, None))
-                        continue
-                    region = shapely.difference(box(tw, ts, te, tn), d)
-                    if region.is_empty or region.area <= (te - tw) * (tn - ts) * FULL_TOL:
+                    tile_box = box(tw, ts, te, tn)
+                    region = tile_box if d is None else shapely.difference(tile_box, d)
+                    if region.is_empty or region.area <= tile_box.area * FULL_TOL:
                         table[(x, y)] = FULL
                         filled += 1
                         continue
-                    plan.append((x, y, shapely.to_wkb(region)))
+                    f = finer.over(z, tile_box) if finer is not None else None
+                    if f is not None:
+                        region = shapely.difference(region, f)
+                        if region.is_empty or region.area <= tile_box.area * FULL_TOL:
+                            elsewhere += 1
+                            continue
+                    plan.append((x, y, None if d is None and f is None else shapely.to_wkb(region)))
 
                 def tasks(z=z, plan=plan):
                     for x, y, region in plan:
@@ -290,8 +388,10 @@ def decode_to_pickles(mbtiles_paths, out_dir, workers, log=print):
                         d = table.get((x, y))
                         g = shapely.from_wkb(c)
                         table[(x, y)] = g if d is None else shapely.union(d, g)
+                left_to_finer += elsewhere
                 log(f"zoom {z}: {len(have.get(z, ())):,} tiles in the file; filled by deeper zooms (not read) "
-                    f"{filled:,}; read for the part no deeper zoom covers {len(plan):,}")
+                    f"{filled:,}; left whole to a finer chart of another file {elsewhere:,}; "
+                    f"read for the part no finer chart covers {len(plan):,}")
                 below = table
             con.close()
     for L, v in acc.items():
@@ -303,4 +403,4 @@ def decode_to_pickles(mbtiles_paths, out_dir, workers, log=print):
         f"tiles that failed to decode: {len(failed)}")
     log("pieces per layer: " + ", ".join(f"{L} {n:,}" for L, n in pieces.items()))
     return {"tiles": n_tiles, "by_zoom": dict(sorted(by_zoom.items())), "failed": failed, "pieces": pieces,
-            "seconds": time.time() - t0}
+            "left_to_finer": left_to_finer, "seconds": time.time() - t0}

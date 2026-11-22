@@ -1,6 +1,6 @@
 """build-mesh.py — build the navigation mesh of one or more chart files.
 
-    build-mesh.py 01CGD_ENCs.mbtiles --land land_polygons.shp [-o data/tiles]
+    build-mesh.py 01CGD_ENCs.mbtiles --land land_polygons.shp --catalog ENCProdCat_19115.xml [-o data/tiles]
 
 Runs the four stages of the experiment in order, with the same
 intermediate files, under the work directory (default data/mesh/<name>/):
@@ -95,6 +95,12 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mbtiles", nargs="+", help="chart file(s); several are decoded as separate sources")
     ap.add_argument("--land", help="OSM land_polygons.shp (osmdata.openstreetmap.de split package)")
+    ap.add_argument("--catalog", metavar="XML",
+                    help="NOAA's ENC product catalogue (ENCProdCat_19115.xml): a coarser zoom of the chart is not "
+                         "read where a chart cell of any district is rendered deeper (mesh/decode.py)")
+    ap.add_argument("--no-catalog", action="store_true",
+                    help="read coarser zooms by this file's own coverage alone: only for a chart file whose water "
+                         "no other district's file charts, and for tests")
     ap.add_argument("-o", "--out", default="data/tiles", help="output directory (default data/tiles)")
     ap.add_argument("--name", help="output name; default: first input's stem without _ENCs (01CGD_ENCs -> 01CGD)")
     ap.add_argument("--work", help="work directory (default data/mesh/<name>)")
@@ -123,6 +129,15 @@ def main(argv=None):
             ap.error(f"no such file: {p}")
     if a.land and not os.path.exists(a.land):
         ap.error(f"no such file: {a.land}")
+    if a.catalog and a.no_catalog:
+        ap.error("--catalog and --no-catalog exclude each other")
+    if a.catalog and not os.path.exists(a.catalog):
+        ap.error(f"no such file: {a.catalog}")
+    # No default: forgetting the catalogue would quietly let a district's coarse cells speak for the next
+    # district's water (the meshes published on 2026-11-21). --reuse-decoded reads pickles and decodes nothing.
+    if not a.catalog and not a.no_catalog and not a.reuse_decoded:
+        ap.error("give --catalog ENCProdCat_19115.xml (https://charts.noaa.gov/ENCs/ENCProdCat_19115.xml), "
+                 "or --no-catalog to read coarser zooms by this file's coverage alone")
     name = a.name or default_name(a.mbtiles[0])
     work = a.work or os.path.join("data", "mesh", name)
     os.makedirs(work, exist_ok=True)
@@ -141,14 +156,30 @@ def main(argv=None):
 
     # ---- stage 1: decode z16
     pkl = os.path.join(work, "z16_layers")
+    catalog = None
     if a.reuse_decoded and os.path.isdir(pkl) and any(f.endswith(".pkl") for f in os.listdir(pkl)):
         log(f"stage 1: reusing decoded layers in {pkl}")
-        dec = {"tiles": None, "by_zoom": None, "failed": [], "pieces": None, "reused": True}
+        dec = {"tiles": None, "by_zoom": None, "failed": [], "pieces": None, "left_to_finer": None, "reused": True}
     else:
+        if not a.catalog and not a.no_catalog:
+            log(f"ERROR: --reuse-decoded, but {pkl} holds no decoded layers; decoding needs --catalog or --no-catalog")
+            return 1
         if os.path.isdir(pkl):
             shutil.rmtree(pkl)
-        log("stage 1: decoding the tiles (zoom 16, and coarser zooms where zoom 16 has no chart coverage)")
-        dec = decode.decode_to_pickles(a.mbtiles, pkl, a.workers, log=log)
+        catalog_cells = None
+        if a.catalog:
+            catalog_cells = decode.read_catalog_cells(a.catalog)
+            if not catalog_cells:
+                log(f"ERROR: no chart cell outline read from {a.catalog}")
+                return 1
+            catalog = {"file": os.path.basename(a.catalog), "bytes": os.path.getsize(a.catalog),
+                       "sha256": sha256(a.catalog), "cell_outlines": len(catalog_cells)}
+            log(f"catalogue {a.catalog}: {len(catalog_cells):,} cell outlines")
+        else:
+            log("WARNING: --no-catalog: coarser zooms are read wherever this file has no finer coverage, "
+                "also where another district's file charts the water in detail")
+        log("stage 1: decoding the tiles (zoom 16, and coarser zooms where no finer chart covers)")
+        dec = decode.decode_to_pickles(a.mbtiles, pkl, a.workers, log=log, catalog_cells=catalog_cells)
 
     # ---- stage 2: extent
     cells = decode.z16_cells(a.mbtiles, a.tile_deg, lambda lon, lat: extent.cell(lon, lat, a.tile_deg))
@@ -254,6 +285,10 @@ def main(argv=None):
         "z16_tiles_decoded": dec["by_zoom"].get(decode.ZOOM, 0) if dec["by_zoom"] is not None else None,
         "tiles_decoded_by_zoom": ({str(z): n for z, n in dec["by_zoom"].items()}
                                   if dec["by_zoom"] is not None else None),
+        # The catalogue the coarser zooms were held back by (null: --no-catalog, or the layers were reused), and
+        # the coarser tiles left whole to a finer chart of another file.
+        "catalog": catalog,
+        "tiles_left_to_finer_charts": dec["left_to_finer"],
         "z16_cells": len(cells),
         "clusters": results,
         "triangles": sum(r["triangles"] for r in results),
