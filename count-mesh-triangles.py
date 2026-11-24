@@ -54,14 +54,30 @@ def read_tile(path, n):
     return corners, depth, flags, mark
 
 
+def lon_runs(west, east):
+    """The runs of stored longitude (between -180 and 180) a box covers going east from `west` to `east`: one
+    run, or two when the box crosses the date line (its west greater than its east, or an end beyond 180)."""
+    if east - west >= 360:
+        return [(-180.0, 180.0)]
+    w = ((west + 180.0) % 360.0) - 180.0
+    e = ((east + 180.0) % 360.0) - 180.0
+    if e == -180.0 and east > west and w != -180.0:
+        e = 180.0                                     # a box that ends on the date line ends at 180
+    return [(w, e)] if w <= e else [(w, 180.0), (-180.0, e)]
+
+
 def measure(mesh_dir, boxes):
-    idx = json.load(open(os.path.join(mesh_dir, "index.json")))
+    with open(os.path.join(mesh_dir, "index.json")) as f:
+        idx = json.load(f)
     K = idx["xScale"]
     out = {tuple(b): dict(triangles=0, navigable=0, depth_known=0, hazard=0, mark=0, area_km2=0.0,
                           tiles=0) for b in boxes}
+    runs = {tuple(b): lon_runs(b[0], b[2]) for b in boxes}
     for t in idx["tiles"]:
         bb = t["bbox"]
-        hits = [b for b in boxes if not (bb[2] < b[0] or bb[0] > b[2] or bb[3] < b[1] or bb[1] > b[3])]
+        # a tile's extent is plain numbers (no tile lies across the date line); a box may be two runs
+        hits = [b for b in boxes if not (bb[3] < b[1] or bb[1] > b[3])
+                and any(not (bb[2] < w or bb[0] > e) for w, e in runs[tuple(b)])]
         if not hits:
             continue
         corners, depth, flags, mark = read_tile(os.path.join(mesh_dir, t["file"]), t["n"])
@@ -73,7 +89,10 @@ def measure(mesh_dir, boxes):
         deg_m = R_EARTH_M * math.pi / 180.0
         area_km2 = cr * deg_m * deg_m / 1e6
         for b in hits:
-            m = (lon >= b[0]) & (lon <= b[2]) & (lat >= b[1]) & (lat <= b[3])
+            in_lon = np.zeros(len(lon), dtype=bool)
+            for w, e in runs[tuple(b)]:
+                in_lon |= (lon >= w) & (lon <= e)
+            m = in_lon & (lat >= b[1]) & (lat <= b[3])
             if not m.any():
                 continue
             r = out[tuple(b)]

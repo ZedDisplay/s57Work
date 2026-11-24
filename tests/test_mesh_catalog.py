@@ -46,6 +46,7 @@ class Entry(unittest.TestCase):
             ({"clusters": [{"dir": ".", "box": [1, 2, float("nan"), 4]}]}, "clusters[0].box"),
             ({"clusters": [{"dir": ".", "box": [1, 4, 3, 2]}]}, "clusters[0].box"),
             ({"clusters": [{"dir": ".", "box": [1, 2, 1, 4]}]}, "clusters[0].box"),
+            ({"clusters": [{"dir": ".", "box": [180, 10, -180, 11]}]}, "clusters[0].box"),
             ({"clusters": [{"dir": ".", "box": [165.5, 38.25, 230.5, 81.75]}]}, "clusters[0].box"),
         ]
         for over, field in cases:

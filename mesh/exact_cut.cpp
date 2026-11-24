@@ -16,7 +16,12 @@
 //   nt x 3 int32 neighbours (neighbour k is across the side opposite corner k; -1 = none inside the tile box),
 //   nt int32 state, (nstates + 1) int64 offsets, nids int32 shape ids,
 //   nt x 3 int32 line: for the side opposite corner k, the number of the input segment it lies on (the lowest
-//   when several; segments are numbered in input order, the tile box's four sides last), -1 = on no input line.
+//   when several; segments are numbered in input order, the tile box's four sides last), -1 = on no input line;
+//   nt x 3 int32 line2: the same among chart lines only (rings given with shape <= -2), -1 = on none;
+//   nv int8: per corner, -1, or >= 0 where a chart point (a ring of one corner) lies there;
+//   int64 nl; (nt x 3 + 1) int64 offsets; nl int32: for each side, in order, every chart-line input segment it
+//   lies on (side q's run is ids[offsets[q] .. offsets[q + 1])).
+// mesh/build.py process_tile reads exactly this layout.
 // Every input segment is given to CGAL as its own constraint, so each piece of line knows its input segment.
 // Only triangles inside the tile box are written.
 #include <CGAL/Exact_predicates_exact_constructions_kernel.h>
@@ -45,6 +50,7 @@ typedef CDTP::Vertex_handle Vh;
 typedef CDTP::Face_handle Fh;
 
 static bool rd(FILE* f, void* p, size_t n) { return fread(p, 1, n, f) == n; }
+static bool wr(FILE* f, const void* p, size_t size, size_t n) { return n == 0 || fwrite(p, size, n, f) == n; }
 
 int main(int argc, char** argv) {
   if (argc < 3) { fprintf(stderr, "usage: exact_cut in out\n"); return 1; }
@@ -194,21 +200,25 @@ int main(int argc, char** argv) {
   std::vector<int32_t> ids;
   for (int s : sused) { for (int sid : states[s]) ids.push_back(sid); off.push_back((int64_t)ids.size()); }
   FILE* out = fopen(argv[2], "wb");
+  if (!out) { perror("out"); return 1; }
   int64_t hdr[5] = {(int64_t)kept.size(), (int64_t)(xy.size() / 2), (int64_t)sused.size(), (int64_t)ids.size(), clash / 2};
-  fwrite(hdr, 8, 5, out);
-  fwrite(xy.data(), 8, xy.size(), out);
-  fwrite(tri.data(), 4, tri.size(), out);
-  fwrite(nbr.data(), 4, nbr.size(), out);
-  fwrite(st.data(), 4, st.size(), out);
-  fwrite(off.data(), 8, off.size(), out);
-  fwrite(ids.data(), 4, ids.size(), out);
-  fwrite(line.data(), 4, line.size(), out);
-  fwrite(line2.data(), 4, line2.size(), out);      // per side: lowest input segment number among chart lines, -1 = none
-  fwrite(vflag.data(), 1, vflag.size(), out);      // per corner: band rank of the most detailed chart point there, -1 = none
   int64_t nl = (int64_t)lids.size();
-  fwrite(&nl, 8, 1, out);
-  fwrite(loff.data(), 8, loff.size(), out);        // nt*3 + 1 offsets into the ids below, one run per side
-  fwrite(lids.data(), 4, lids.size(), out);        // every chart-line input segment each side lies on
-  fclose(out);
+  // Every write is checked, and so is the close (which flushes the last of it): a full disk must not leave a
+  // short file behind a zero exit status.
+  bool ok = wr(out, hdr, 8, 5)
+    && wr(out, xy.data(), 8, xy.size())
+    && wr(out, tri.data(), 4, tri.size())
+    && wr(out, nbr.data(), 4, nbr.size())
+    && wr(out, st.data(), 4, st.size())
+    && wr(out, off.data(), 8, off.size())
+    && wr(out, ids.data(), 4, ids.size())
+    && wr(out, line.data(), 4, line.size())
+    && wr(out, line2.data(), 4, line2.size())      // per side: lowest input segment number among chart lines, -1 = none
+    && wr(out, vflag.data(), 1, vflag.size())      // per corner: band rank of the most detailed chart point there, -1 = none
+    && wr(out, &nl, 8, 1)
+    && wr(out, loff.data(), 8, loff.size())        // nt*3 + 1 offsets into the ids below, one run per side
+    && wr(out, lids.data(), 4, lids.size());       // every chart-line input segment each side lies on
+  if (fclose(out) != 0) ok = false;
+  if (!ok) { fprintf(stderr, "exact_cut: writing %s failed\n", argv[2]); return 1; }
   return 0;
 }

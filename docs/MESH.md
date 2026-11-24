@@ -24,6 +24,11 @@ them in by-band mode (`data/geojson/`):
 - `bandN/.CELL.exported`, the chart build's completion marker, written
   after a cell's last layer. A cell with layer files and no marker (an
   export that did not finish) stops the build;
+- `bandN/.export-errors.log`, the chart build's record of what failed in
+  its last export of the band. A cell whose layers could not be listed
+  leaves no file and no marker, and only this log says so: any line in
+  it stops the build. (`s57-to-mbtiles.py --cells-only` itself exits
+  non-zero when a cell did not finish.)
 - `cancelled-cells.json` beside the folder: the cells NOAA has withdrawn
   (DSID edition 0). They are left out.
 
@@ -50,7 +55,18 @@ folders is read from the first.
   a new-scheme cell (region code `GLB`; `ARC`, `ANT`, `ATL`, `GRL`,
   `GOM`, `PAC`) wins over a legacy cell, the chart build's Stage 2b
   rule. Only the winning chart's areas, lines and points count at a
-  spot. The coverage outline (`M_COVR`) is not used.
+  spot. The coverage outline (`M_COVR`) is not used. The winner is
+  decided by rank (band), not by cell: a shape of a cell of the winning
+  rank counts also where that cell itself has no skin-of-the-earth
+  area. A correctly made chart has no feature outside its own coverage,
+  so this gives the same mesh as deciding by cell; kept by rank on the
+  owner's decision of 2026-11-24, and may need to be revisited.
+- A pontoon, hulk or floating dock (`PONTON`, `HULKES`, `FLODOC`) with
+  no depth, dredged or unsurveyed area under it is not water.
+- A chart line lying exactly on a tile edge is marked by each tile from
+  the charts that win on its own side; where those differ the side gets
+  both records together, as a side inside a tile gets its mark from the
+  charts that win on both its sides.
 - **Depth** of a triangle: the shallowest `DEPARE` it lies in (`DRVAL1`,
   the shallow end of the area's range); a dredged area's depth replaces
   it; an obstruction or wreck area with a depth (`VALSOU`) lowers it. Of

@@ -2764,6 +2764,19 @@ def prepare_band(
         native_gdal=native_gdal, runtime=runtime, max_workers=max_workers,
         data_dir=data_dir)
     if cells_only:
+        # The cells are the product here, so every one must have finished:
+        # a cell without its completion marker (a layer failed, or its
+        # layers could not even be listed and it has no file at all) is a
+        # hole in whatever is built from them. The tile build carries on
+        # past such a cell and reports it; this mode stops.
+        unfinished = sorted(c.stem for c in band_cells
+                            if not _cell_marker(band_geojson_dir, c.stem).exists())
+        if unfinished:
+            print(f"ERROR: [{label}] {len(unfinished)} cell(s) did not export "
+                  f"completely: {', '.join(unfinished[:10])}"
+                  f"{' ...' if len(unfinished) > 10 else ''}; see "
+                  f"{band_geojson_dir / EXPORT_ERROR_LOG}", file=sys.stderr)
+            sys.exit(1)
         return None
 
     # Stage 2b: clip legacy cells under reschemed cells of the same band

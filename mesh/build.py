@@ -70,7 +70,9 @@ POINT_LAYERS = sorted(HAZ | MARKS | {"SOUNDG"})
 LAYERS = sorted(set(AREA_LAYERS) | set(LINE_LAYERS) | set(POINT_LAYERS))
 LAYER_NO = {L: k for k, L in enumerate(LAYERS)}
 # what the mesh file carries per triangle
-COLS = ["land", "struct", "depth", "dredged", "clear", "fair", "haz", "hazv", "is_nav", "opening", "nochart"]
+COLS = ["land", "struct", "depth", "dredged", "clear", "fair", "haz", "hazv", "is_nav", "opening", "nochart", "nowater"]
+# Water is where the winning chart has one of these; a pontoon, hulk or floating dock with none under it is not water.
+WATER = {"DEPARE", "DRGARE", "UNSARE"}
 # side marks (bits) and corner marks (bits)
 S_STRUCT, S_HAZ, S_OVERHEAD, S_OPENING, S_TRACK, S_NAVLINE = 1, 2, 4, 8, 16, 32
 C_HAZ, C_MARK, C_CHANMARK, C_SOUNDING = 1, 2, 4, 8
@@ -132,13 +134,23 @@ def band_cells(root, band):
     marker (an export that did not finish), and unsuffixed files that cannot be given to exactly one cell,
     stop the build: a cell read in part would be a hole nothing later can see."""
     d = f"{root}/{band}"
+    # The chart build's own record of what failed in its last export of this band (one line per failure: a cell
+    # whose layers could not be listed leaves no file and no marker, and only this log says it is missing).
+    errors = f"{d}/.export-errors.log"
+    if os.path.exists(errors):
+        with open(errors) as fh:
+            lines = [ln.strip() for ln in fh if ln.strip()]
+        if lines:
+            raise RuntimeError(f"{d}: the chart export recorded {len(lines)} failure(s) (.export-errors.log); "
+                               f"the first: {lines[0][:200]}")
     marked = {os.path.basename(f)[1:-len(".exported")].upper() for f in glob.glob(f"{d}/.*.exported")}
     marked = {nm for nm in marked if CELL_RE.match(nm)}
-    suffixed, bare = set(), []
+    suffixed, bare = {}, []                  # CELL NAME -> the cell's name as its files spell it
     for f in glob.glob(f"{d}/*.geojson"):
-        nm = os.path.basename(f)[:-8].rpartition("_")[2].upper()
-        if CELL_RE.match(nm):
-            suffixed.add(nm)
+        as_written = os.path.basename(f)[:-8].rpartition("_")[2]
+        if CELL_RE.match(as_written.upper()):
+            if suffixed.setdefault(as_written.upper(), as_written) != as_written:
+                raise RuntimeError(f"{d}: cell {as_written.upper()} has layer files under two spellings of its name")
         else:
             bare.append(os.path.basename(f))
     if bare:
@@ -146,10 +158,12 @@ def band_cells(root, band):
             raise RuntimeError(f"{d}: layer files without a cell name ({sorted(bare)[0]}, ...) are a one-cell export, but the "
                                f"folder has {len(marked)} completion markers and {len(suffixed)} cells with named files")
         return {next(iter(marked)): ""}
-    if suffixed - marked:
-        raise RuntimeError(f"{d}: {len(suffixed - marked)} cells have layer files but no completion marker "
-                           f"(.CELL.exported): their export did not finish; the first: {sorted(suffixed - marked)[0]}")
-    return {nm: f"_{nm}" for nm in suffixed}
+    unmarked = set(suffixed) - marked
+    if unmarked:
+        raise RuntimeError(f"{d}: {len(unmarked)} cells have layer files but no completion marker "
+                           f"(.CELL.exported): their export did not finish; the first: {sorted(unmarked)[0]}")
+    # The name is the cell's identity (upper case, as the cancelled list has it); the files are read as spelled.
+    return {nm: f"_{as_written}" for nm, as_written in suffixed.items()}
 
 
 def cell_bbox(item):
@@ -244,6 +258,7 @@ def rules(states_active, shapes):
         if ids is None:
             continue
         A["nochart"][a] = 0
+        A["nowater"][a] = 0 if any(shapes[sid][0] in WATER for sid in ids) else 1
         dep_min, drg, obs = {}, {}, {}
         for sid in ids:
             L, pr, rank, order = shapes[sid]
@@ -437,6 +452,12 @@ def process_tile(ij):
             if not skin:
                 active.append(None); continue
             top = min(skin); top_of_state[k] = top
+            # The winner is decided by rank (band), not by cell: every shape of that rank counts here, also one
+            # from a cell of the same rank that has no skin-of-the-earth area at this spot. A correctly made
+            # chart has no feature outside its own coverage, so the two rules give the same mesh. Kept by rank
+            # on the owner's decision of 2026-11-24 (PR #10 review); MAY NEED TO BE REVISITED: deciding by the
+            # cells that actually supply the winning coverage is the stricter rule (and the same applies to the
+            # lines and points below, which are also taken by rank).
             act = [sid for sid in ids if shapes[sid][2] == top]
             overlap_states[k] = sum(1 for sid in act if shapes[sid][0] in SKIN) > 1
             active.append(act)
@@ -447,7 +468,8 @@ def process_tile(ij):
         P = V[T]
         area = np.abs((P[:, 1, 0] - P[:, 0, 0]) * (P[:, 2, 1] - P[:, 0, 1]) - (P[:, 2, 0] - P[:, 0, 0]) * (P[:, 1, 1] - P[:, 0, 1])) / 2
         NC = COLS.index("nochart")
-        hole = (ukeys[key][:, 0] != 0) | (ukeys[key][:, NC] != 0)
+        # not water: land, uncharted, and a charted area with no water area under it (a pontoon outside any depth area)
+        hole = (ukeys[key][:, 0] != 0) | (ukeys[key][:, NC] != 0) | (ukeys[key][:, COLS.index("nowater")] != 0)
         # sides lying on a chart line of the winning chart there: their mark
         marks, mark_no = [], {}
         side_mark = np.full((nt, 3), -1, dtype=np.int64)

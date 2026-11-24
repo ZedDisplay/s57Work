@@ -150,6 +150,11 @@ def main(argv=None):
     # Absolute: the second stage runs in its own interpreter from the repository folder.
     work = os.path.abspath(a.work or os.path.join("data", "mesh", a.name))
     out = os.path.abspath(a.out)
+    # <work>/tiles is emptied before the build and removed after it: the output must not be it or lie inside it.
+    if os.path.commonpath([os.path.realpath(out), os.path.realpath(os.path.join(work, "tiles"))]) \
+            == os.path.realpath(os.path.join(work, "tiles")):
+        ap.error(f"the output directory {out} is the work directory's tiles folder or lies inside it "
+                 f"({os.path.join(work, 'tiles')}), which the build empties and removes")
     os.makedirs(work, exist_ok=True)
     os.makedirs(out, exist_ok=True)
 

@@ -124,24 +124,30 @@ class AcrossTheDateLine(unittest.TestCase):
     def test_the_water_is_joined_across_the_line(self):
         nb, rev = self.m["neighbours"], self.m["rev"]
         p = self.m["lonlat"]
-        crossings = 0
+        seam = []                                   # the latitude interval of each side that joins the two tiles
         for t in np.flatnonzero(self.west_tile).tolist():
             for k in range(3):
                 u = int(nb[t, k])
                 if u < 0 or not self.east_tile[u]:
                     continue
-                crossings += 1
                 r = int(rev[t, k])
+                self.assertTrue(0 <= r <= 2, f"the link from triangle {t} names no side of its neighbour ({r})")
                 self.assertEqual(int(nb[u, r]), t)
+                self.assertEqual(int(rev[u, r]), k)
+                seam.append(tuple(sorted((float(p[t, k, 1]), float(p[t, (k + 1) % 3, 1])))))
                 mine = sorted([p[t, k].tolist(), p[t, (k + 1) % 3].tolist()], key=lambda q: q[1])
                 theirs = sorted([p[u, r].tolist(), p[u, (r + 1) % 3].tolist()], key=lambda q: q[1])
                 for (lon_w, lat_w), (lon_e, lat_e) in zip(mine, theirs):
                     self.assertAlmostEqual(lon_w, 180.0, places=9)       # the same corner: 180 west of the line,
                     self.assertAlmostEqual(lon_e, -180.0, places=9)      # -180 east of it
                     self.assertEqual(lat_w, lat_e)
-        self.assertGreater(crossings, 0, "no side joins the two tiles")
-        # the sides on the line cover it from 10.0 to 10.1, once
-        self.assertTrue(((nb < 0).sum(axis=1) <= 2).all())
+        self.assertGreater(len(seam), 0, "no side joins the two tiles")
+        # the joining sides cover the line from 10.0 to 10.1 end to end: no gap, no overlap
+        seam.sort()
+        self.assertAlmostEqual(seam[0][0], 10.0, places=9)
+        self.assertAlmostEqual(seam[-1][1], 10.1, places=9)
+        for (_, top), (bottom, _) in zip(seam, seam[1:]):
+            self.assertEqual(top, bottom)
 
     def test_a_chart_point_on_the_line_is_one_corner_in_both_tiles(self):
         tt, kk = np.nonzero(self.m["corner_flags"] & C_HAZARD)

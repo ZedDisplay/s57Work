@@ -139,5 +139,44 @@ class MeshPipeline(unittest.TestCase):
         self.assertTrue(any((self.meshwork / "tiles").glob("tile_*.npz")), "--keep-intermediate keeps the cut")
 
 
+@unittest.skipUnless(h.HAVE_GDAL, "needs ogr2ogr/ogrinfo")
+class ACellThatDoesNotExport(unittest.TestCase):
+    """The fixture's cells plus one cell file that is not S-57: GDAL cannot list its layers, so it leaves no
+    file and no completion marker. The cell export must not report success, and the mesh build must not build
+    from what is left."""
+
+    @classmethod
+    def setUpClass(cls):
+        import zipfile
+        cls.work = Path(tempfile.mkdtemp(prefix="s57badcell-"))
+        with zipfile.ZipFile(h.FIXTURE_ZIP) as z:
+            z.extractall(cls.work / "src")
+        bad = cls.work / "src" / "ENC_ROOT" / "US5ZZ9ZZ"
+        bad.mkdir(parents=True)
+        (bad / "US5ZZ9ZZ.000").write_text("this is not an S-57 cell\n")
+        cls.export = h.run_pipeline(cls.work, str(cls.work / "src"), "--by-band", "--no-replacements",
+                                    "--cells-only", "-j", "2")
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.work, ignore_errors=True)
+
+    def test_cells_only_fails(self):
+        self.assertEqual(self.export.returncode, 1, self.export.stdout[-2000:] + self.export.stderr[-2000:])
+        self.assertIn("1 cell(s) did not export completely: US5ZZ9ZZ", self.export.stderr)
+        self.assertNotIn("Cells exported (no tiles built)", self.export.stdout)
+
+    @unittest.skipUnless(HAVE_MESH_DEPS and h.HAVE_CGAL, "needs the mesh packages and a C++ compiler with CGAL")
+    def test_the_mesh_build_refuses_the_folder(self):
+        p = subprocess.run(
+            [sys.executable, str(h.ROOT / "build-mesh.py"), str(self.work / "data" / "geojson"), "--name", "BAD",
+             "-o", str(self.work / "out"), "--work", str(self.work / "meshwork"), "-j", "2"],
+            cwd=h.ROOT, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 1, p.stdout[-2000:] + p.stderr[-2000:])
+        self.assertIn("the chart export recorded 1 failure(s)", p.stdout)
+        self.assertIn("US5ZZ9ZZ", p.stdout)
+        self.assertFalse((self.work / "out" / "BAD_mesh.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

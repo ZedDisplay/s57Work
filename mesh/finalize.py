@@ -128,8 +128,28 @@ second = np.where(cnt == 2, order[np.minimum(start + 1, len(order) - 1)], -1)
 two = second >= 0
 if not ((PLB[first[two]] == -2) & (PLB[second[two]] == -2)).all():
     fail("a side recorded twice is not a tile-edge side in both tiles")
-if not (PMK[first[two]] == PMK[second[two]]).all():
-    fail("the two tiles' records of a tile-edge side carry different marks")
+# A chart line lying on a tile edge is marked by each tile from the charts that win on its own side of the edge
+# (it cannot see the other side). Where the winning charts differ across the edge the two records differ, and
+# the side's mark is what a side inside a tile gets from the charts that win on both its sides: the two
+# records together (the lines of either, the lower clearance, the shallower hazard).
+_d = np.flatnonzero(PMK[first[two]] != PMK[second[two]])
+n_edge_marks_joined = len(_d)
+if n_edge_marks_joined:
+    _none = np.array([0.0, -999.0, 1e9])
+
+    def _rows(m):
+        return np.where((m >= 0)[:, None], MARK[np.maximum(m, 0)] if len(MARK) else _none, _none)
+    _a, _b = _rows(PMK[first[two]][_d]), _rows(PMK[second[two]][_d])
+    _clr = np.where(_a[:, 1] == -999.0, _b[:, 1], np.where(_b[:, 1] == -999.0, _a[:, 1], np.minimum(_a[:, 1], _b[:, 1])))
+    _both = np.column_stack([(_a[:, 0].astype(np.int64) | _b[:, 0].astype(np.int64)).astype(np.float64), _clr,
+                             np.minimum(_a[:, 2], _b[:, 2])])
+    _n_old = len(MARK)
+    MARK, _inv = np.unique(np.vstack([MARK, _both]) if _n_old else _both, axis=0, return_inverse=True)
+    _inv = np.asarray(_inv).ravel()
+    PMK = np.where(PMK >= 0, _inv[np.maximum(PMK, 0)] if _n_old else -1, -1)
+    _joined = _inv[_n_old:]
+    _f2, _s2 = first[two][_d], second[two][_d]
+    PMK[_f2] = _joined; PMK[_s2] = _joined
 s_va, s_vb = va[first], vb[first]
 s_g, s_k, s_mk = PG[first], PK[first], PMK[first]
 s_la = PLA[first]
@@ -186,6 +206,7 @@ fp = np.zeros(nch, dtype=np.int64); fp[ch[::-1]] = np.arange(ne)[::-1]
 SEG_MK = s_mk[fp]
 log(f"join: tile-edge sides between the same water, dropped {n_seam_dropped:,}; tile-edge sides with nothing recorded on the other side {edge_single:,}; "
     f"corners that are not corners, removed {len(e1):,}; outline segments {nch:,}; {time.time() - t0:.0f} s"
+    + (f"; chart-line marks on tile edges joined from two differing records {n_edge_marks_joined:,}" if n_edge_marks_joined else "")
     + (f"; the mesh crosses the date line: {n_date_line:,} sides on it joined from both tiles and kept" if CROSSES else ""))
 
 # ---------------------------------------------------------------- shape
@@ -499,12 +520,14 @@ for k_ in order_t:
     with open(f"{outdir}/{fname}", "wb") as fh:
         fh.write(MESH_FORMAT_MAGIC.encode() + struct.pack("<I", n_) + struct.pack("<dd", origin_lon, SOUTH + (k_[1] - j0) * 0.25) + b"\0" * 4)
         fh.write(corners.reshape(n_ * 6).astype("<f8").tobytes())
-        fh.write(nbs.reshape(n_ * 3).tobytes())
+        # every multi-byte field little-endian, whatever the machine that builds
+        fh.write(nbs.reshape(n_ * 3).astype("<i4").tobytes())
         fh.write((SHORE[g] * dmult[g]).astype("<f4").tobytes())
-        fh.write(depth[g].tobytes()); fh.write(clear[g].tobytes()); fh.write(hazv[g].tobytes())
+        fh.write(depth[g].astype("<f4").tobytes()); fh.write(clear[g].astype("<f4").tobytes()); fh.write(hazv[g].astype("<f4").tobytes())
         fh.write(REV[g].reshape(n_ * 3).tobytes()); fh.write(flags[g].tobytes())
-        fh.write(side_bits[g].reshape(n_ * 3).tobytes()); fh.write(side_clear[g].reshape(n_ * 3).tobytes()); fh.write(side_hazv[g].reshape(n_ * 3).tobytes())
-        fh.write(corner_bits[g].reshape(n_ * 3).tobytes()); fh.write(corner_val[g].reshape(n_ * 3).tobytes())
+        fh.write(side_bits[g].reshape(n_ * 3).tobytes())
+        fh.write(side_clear[g].reshape(n_ * 3).astype("<f4").tobytes()); fh.write(side_hazv[g].reshape(n_ * 3).astype("<f4").tobytes())
+        fh.write(corner_bits[g].reshape(n_ * 3).tobytes()); fh.write(corner_val[g].reshape(n_ * 3).astype("<f4").tobytes())
     nbytes += os.path.getsize(f"{outdir}/{fname}")
     lo_ = corners.reshape(-1, 2).min(axis=0); hi_ = corners.reshape(-1, 2).max(axis=0)
     bw, be = float(lo_[0] / K), float(hi_[0] / K)
@@ -531,7 +554,8 @@ json.dump({"version": MESH_INDEX_VERSION, "format": MESH_FORMAT_MAGIC, "name": n
            "fields": ["corners f64[6]", "neighbours i32[3]", "mult f32", "depth f32", "clear f32", "hazv f32", "rev i8[3]", "flags u8",
                       "sideFlags u8[3]", "sideClear f32[3]", "sideHazv f32[3]", "cornerFlags u8[3]", "cornerVal f32[3]"],
            "sideFlagBits": {"structure": 1, "hazard": 2, "overhead": 4, "opening": 8, "recommendedTrack": 16, "navigationLine": 32},
-           "cornerFlagBits": {"hazard": 1, "mark": 2, "channelMark": 4, "sounding": 8}}, open(f"{outdir}/index.json", "w"))
+           "cornerFlagBits": {"hazard": 1, "mark": 2, "channelMark": 4, "sounding": 8}}, _index_file := open(f"{outdir}/index.json", "w"))
+_index_file.close()
 log(f"\n==== {name}: {nT:,} triangles in {len(index)} tiles, {nbytes / 1e6:.0f} MB; under 20 degrees {thin:,} ({thin / nT * 100:.3f} %), not a gate; "
     f"second stage {time.time() - t_start:.0f} s")
 log("every check passed")

@@ -97,8 +97,10 @@ def validate_entry(e):
             box = c.get("box") if isinstance(c, dict) else None
             # west greater than east is a box across the date line (west eastwards to east), as the router reads it.
             if (not isinstance(box, list) or len(box) != 4 or not all(_is_number(v) for v in box)
-                    or not (box[0] != box[2] and box[1] < box[3]
-                            and -180 <= box[0] <= 180 and -180 <= box[2] <= 180)):
+                    or not (box[1] < box[3] and -180 <= box[0] <= 180 and -180 <= box[2] <= 180
+                            # some width going east: west < east, or across the date line with more than
+                            # nothing between them (180 eastwards to -180 is the same meridian: no width)
+                            and (box[0] < box[2] or box[2] + 360 - box[0] > 0) and box[0] != box[2])):
                 bad.append(f"clusters[{i}].box {box!r}: [west, south, east, north], four finite numbers, longitudes "
                            f"between -180 and 180 and not equal (west > east: across the date line), south < north")
     return bad

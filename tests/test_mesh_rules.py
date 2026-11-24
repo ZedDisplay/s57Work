@@ -77,6 +77,16 @@ class Rules(unittest.TestCase):
         self.assertEqual((r["fair"], r["is_nav"]), (0, 1))
         self.assertEqual(row(("PONTON", {}))["struct"], 1)
 
+    def test_water_needs_a_water_area(self):
+        # a pontoon, hulk or floating dock is charted instead of a depth area, not on top of one: on its own it
+        # is not water; with a depth, dredged or unsurveyed area under it, it is water with a structure on it
+        for layer in ("PONTON", "HULKES", "FLODOC"):
+            self.assertEqual(row((layer, {}))["nowater"], 1, layer)
+        r = row(("DEPARE", {"DRVAL1": 4.0}), ("PONTON", {}))
+        self.assertEqual((r["nowater"], r["struct"], r["depth"]), (0, 1, 4.0))
+        for layer in ("DEPARE", "DRGARE", "UNSARE"):
+            self.assertEqual(row((layer, {}))["nowater"], 0, layer)
+
     def test_clearance_is_the_lowest_and_opening_is_kept(self):
         r = row(("DEPARE", {"DRVAL1": 4.0}), ("BRIDGE", {"CATBRG": "1", "VERCLR": "20"}), ("CBLOHD", {"VERCLR": "12"}))
         self.assertEqual((r["clear"], r["opening"]), (12.0, 0))
@@ -87,6 +97,7 @@ class Rules(unittest.TestCase):
     def test_no_chart(self):
         r = dict(zip(B.COLS, B.rules([None], [])[0].tolist()))
         self.assertEqual((r["nochart"], r["land"], r["depth"], r["hazv"]), (1, 0, -999.0, 1e9))
+        self.assertEqual(r["nowater"], 0, "no chart is its own reason; 'no water area' is said of a chart that speaks")
 
 
 def write_cell(root, band, name, layer="DEPARE", box=(0.0, 0.0, 1.0, 1.0)):
@@ -156,6 +167,30 @@ class CellIndex(unittest.TestCase):
         (Path(root) / "band5" / "DEPARE.geojson").write_text('{"type": "FeatureCollection", "features": []}')
         with self.assertRaises(RuntimeError):
             B.band_cells(root, "band5")
+
+    def test_a_failure_in_the_export_log_stops_the_build(self):
+        # a cell whose layers could not even be listed leaves no file and no marker: only the chart build's
+        # own error log says it is missing
+        root = write_cell(self.own, "band5", "US5XX1AA")
+        log = Path(root) / "band5" / ".export-errors.log"
+        log.write_text("")
+        self.assertEqual(B.band_cells(root, "band5"), {"US5XX1AA": "_US5XX1AA"})
+        log.write_text("US5XX1AB: ogrinfo failed: not recognized as being in a supported file format\n")
+        with self.assertRaises(RuntimeError) as cm:
+            B.band_cells(root, "band5")
+        self.assertIn("US5XX1AB", str(cm.exception))
+
+    def test_files_are_read_as_their_names_are_spelled(self):
+        # the exporter keeps the cell file's own spelling; the cell's identity is the upper-case name
+        root = write_cell(self.own, "band5", "US5XX1AA")
+        write_cell(self.own, "band5", "US5XX1AB")
+        band = Path(root) / "band5"
+        (band / "DEPARE_US5XX1AB.geojson").rename(band / "DEPARE_us5xx1ab.geojson")
+        (band / ".US5XX1AB.exported").rename(band / ".us5xx1ab.exported")
+        self.assertEqual(B.band_cells(root, "band5"), {"US5XX1AA": "_US5XX1AA", "US5XX1AB": "_us5xx1ab"})
+        (self.own / "cancelled-cells.json").write_text(json.dumps({"cancelled": [{"cell": "us5xx1aa"}]}))
+        cells = B.cell_index([root], str(self.work), 1)
+        self.assertEqual([(c[2], c[4], c[6]) for c in cells], [("US5XX1AB", [0.0, 0.0, 1.0, 1.0], "_us5xx1ab")])
 
     def test_an_empty_or_missing_band_has_no_cells(self):
         root = write_cell(self.own, "band5", "US5XX1AA")

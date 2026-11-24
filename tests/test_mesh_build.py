@@ -38,6 +38,7 @@ What is pinned:
   * neighbour links are mutual and the multiplier is in range.
 """
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -60,6 +61,7 @@ OTHER_FINE = (-71.60, 41.06, -71.59, 41.07)
 OBSTRUCTION = (-71.47, 41.13, -71.46, 41.14)
 DREDGED_7 = (-71.59, 41.16, -71.57, 41.18)
 DREDGED_5 = (-71.58, 41.16, -71.56, 41.18)
+PONTOON = (-71.40, 41.06, -71.39, 41.07)      # against the depth area's east edge, outside it: no water under it
 QUAY = ((-71.45, 41.06), (-71.45, 41.10))
 BRIDGE = ((-71.41, 41.06), (-71.41, 41.10))
 ROCK = (-71.44, 41.15)
@@ -112,6 +114,7 @@ def write_cells(base):
         "LNDARE": [area(ISLAND, {})],
         "OBSTRN": [area(OBSTRUCTION, {"VALSOU": 2.5})],
         "DRGARE": [area(DREDGED_7, {"DRVAL1": 7.0}), area(DREDGED_5, {"DRVAL1": 5.0})],
+        "PONTON": [area(PONTOON, {})],
         "SLCONS": [line(QUAY, {})],
         "BRIDGE": [line(BRIDGE, {"CATBRG": "1", "VERCLR": "12.5"})],
         "UWTROC": [point(ROCK, {"VALSOU": 1.2}), point(ROCK_UNDER_FINER_CHART, {"VALSOU": 0.5})],
@@ -144,7 +147,7 @@ class HandMadeCells(unittest.TestCase):
         # From another folder than the repository's: every path the build is given must work from anywhere.
         cls.proc = subprocess.run(
             [sys.executable, str(h.ROOT / "build-mesh.py"), own, other, "--name", "HAND", "-o", "out",
-             "--work", "work", "-j", "2", "--chart-json", "chart.json", "--archive"],
+             "--work", "work", "-j", "2", "--chart-json", "chart.json"],
             cwd=base, capture_output=True, text=True)
         if cls.proc.returncode != 0:
             raise AssertionError(f"build-mesh failed ({cls.proc.returncode}):\n"
@@ -203,13 +206,31 @@ class HandMadeCells(unittest.TestCase):
         e = mc.entry_from_sidecar(self.side, "https://example.test/charts")
         self.assertEqual(mc.validate_entry(e), [])
 
-    def test_archive_and_intermediates(self):
-        arc = self.out / "HAND_mesh.tar.zst"
-        listing = subprocess.run(["tar", "--zstd", "-tf", str(arc)], capture_output=True, text=True)
-        self.assertEqual(listing.returncode, 0, listing.stderr)
-        self.assertIn("HAND_mesh/index.json", listing.stdout)
+    def test_intermediates(self):
         self.assertFalse((self.work / "tiles").exists(), "the cut is removed after a build that passed")
         self.assertTrue((self.work / "tiles.json").exists())
+        self.assertFalse((self.out / "HAND_mesh.tar.zst").exists(), "no archive unless asked for")
+
+    @unittest.skipUnless(shutil.which("tar") and shutil.which("zstd"), "needs tar and zstd")
+    def test_archive(self):
+        # a build of its own: the other tests must not depend on tar and zstd being installed
+        with tempfile.TemporaryDirectory(prefix="s57mesharchive-") as tmp:
+            p = subprocess.run(
+                [sys.executable, str(h.ROOT / "build-mesh.py"), self.own, "--name", "ARC", "-o", str(Path(tmp) / "out"),
+                 "--work", str(Path(tmp) / "work"), "-j", "2", "--archive"], cwd=h.ROOT, capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stdout[-2000:] + p.stderr[-2000:])
+            listing = subprocess.run(["tar", "--zstd", "-tf", str(Path(tmp) / "out" / "ARC_mesh.tar.zst")],
+                                     capture_output=True, text=True)
+            self.assertEqual(listing.returncode, 0, listing.stderr)
+            self.assertIn("ARC_mesh/index.json", listing.stdout)
+
+    def test_the_output_may_not_be_the_folder_the_build_empties(self):
+        with tempfile.TemporaryDirectory(prefix="s57meshout-") as tmp:
+            p = subprocess.run(
+                [sys.executable, str(h.ROOT / "build-mesh.py"), self.own, "--name", "X", "--work", str(Path(tmp) / "w"),
+                 "-o", str(Path(tmp) / "w" / "tiles" / "out")], cwd=h.ROOT, capture_output=True, text=True)
+            self.assertEqual(p.returncode, 2, p.stdout[-500:] + p.stderr[-500:])
+            self.assertIn("tiles folder", p.stderr)
 
     # -- what is water -----------------------------------------------------
 
@@ -223,6 +244,7 @@ class HandMadeCells(unittest.TestCase):
         self.assertGreaterEqual(lon.min(), BOX[0] - 1e-9); self.assertLessEqual(lon.max(), BOX[2] + 1e-9)
         self.assertGreaterEqual(lat.min(), BOX[1] - 1e-9); self.assertLessEqual(lat.max(), BOX[3] + 1e-9)
         self.assertIsNone(h.mesh_triangle_at(self.m, *centre(ISLAND)), "land is not in the mesh")
+        self.assertIsNone(h.mesh_triangle_at(self.m, *centre(PONTOON)), "a pontoon with no water area under it is not water")
 
     def test_cancelled_and_far_cells_are_not_in_the_mesh(self):
         self.assertIsNone(h.mesh_triangle_at(self.m, -71.275, 41.075))
@@ -336,6 +358,8 @@ class HandMadeCells(unittest.TestCase):
     def test_neighbour_links_are_mutual(self):
         nb, rev = self.m["neighbours"], self.m["rev"]
         tt, kk = np.nonzero(nb >= 0)
+        # a linked side names the neighbour's side 0, 1 or 2 (-1 would read the neighbour's last side and pass)
+        self.assertTrue(((rev[tt, kk] >= 0) & (rev[tt, kk] <= 2)).all())
         self.assertTrue((nb[nb[tt, kk], rev[tt, kk]] == tt).all())
         self.assertTrue((rev[nb < 0] == -1).all())
         # a side with no neighbour is on the water's outline: the charted box or the land
@@ -345,6 +369,45 @@ class HandMadeCells(unittest.TestCase):
             on_box = min(abs(mid[0] - BOX[0]), abs(mid[0] - BOX[2]), abs(mid[1] - BOX[1]), abs(mid[1] - BOX[3])) < 1e-9
             on_island = (ISLAND[0] - 1e-9 <= mid[0] <= ISLAND[2] + 1e-9 and ISLAND[1] - 1e-9 <= mid[1] <= ISLAND[3] + 1e-9)
             self.assertTrue(on_box or on_island, mid)
+
+
+@unittest.skipUnless(HAVE_MESH_DEPS and h.HAVE_CGAL, "needs the mesh packages and a C++ compiler with CGAL")
+class ChartLineOnATileEdge(unittest.TestCase):
+    """A band 5 cell west of the tile edge at -71.5 and a band 4 cell east of it, and a band 5 overhead cable
+    lying exactly on that edge. Each tile marks the edge from the chart that wins on its own side, so the two
+    tiles' records of those sides differ; the side carries the cable all the same, as it would inside a tile."""
+
+    def test_the_line_is_kept_and_the_build_passes(self):
+        cable = ((-71.5, 41.06), (-71.5, 41.08))
+        with tempfile.TemporaryDirectory(prefix="s57meshedge-") as tmp:
+            own = Path(tmp) / "own"
+            write_layers(own, "band5", "US5XX1AB", only_cell_of_band=True, layers={
+                "DEPARE": [area((-71.6, 41.05, -71.5, 41.10), {"DRVAL1": 3.0})],
+                "CBLOHD": [line(cable, {"VERCLR": "9.5"})]})
+            write_layers(own, "band4", "US4XX1AA", only_cell_of_band=True, layers={
+                "DEPARE": [area((-71.5, 41.05, -71.4, 41.10), {"DRVAL1": 10.0})]})
+            p = subprocess.run(
+                [sys.executable, str(h.ROOT / "build-mesh.py"), str(own / "geojson"), "--name", "EDGE",
+                 "-o", str(Path(tmp) / "out"), "--work", str(Path(tmp) / "work"), "-j", "2"],
+                cwd=h.ROOT, capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stdout[-3000:] + p.stderr[-3000:])
+            self.assertIn("chart-line marks on tile edges joined from two differing records", p.stdout)
+            m = h.read_mesh(Path(tmp) / "out" / "EDGE_mesh")
+        tt, kk = np.nonzero(m["side_flags"] & S_OVERHEAD)
+        self.assertGreater(len(tt), 0)
+        covered = {}
+        for t, k in zip(tt.tolist(), kk.tolist()):
+            a, b = m["lonlat"][t, k], m["lonlat"][t, (k + 1) % 3]
+            self.assertAlmostEqual(float(a[0]), -71.5, places=9); self.assertAlmostEqual(float(b[0]), -71.5, places=9)
+            self.assertEqual(float(m["side_clear"][t, k]), 9.5)
+            covered[tuple(sorted((round(float(a[1]), 7), round(float(b[1]), 7))))] = True
+            u, r = int(m["neighbours"][t, k]), int(m["rev"][t, k])
+            self.assertTrue(u >= 0 and 0 <= r <= 2, "water on both sides of the cable")
+            self.assertEqual(int(m["side_flags"][u, r]), int(m["side_flags"][t, k]))
+        self.assertAlmostEqual(sum(hi - lo for lo, hi in covered), cable[1][1] - cable[0][1], places=7,
+                               msg="the whole cable, once")
+        self.assertEqual(float(m["depth"][h.mesh_triangle_at(m, -71.55, 41.07)]), 3.0)
+        self.assertEqual(float(m["depth"][h.mesh_triangle_at(m, -71.45, 41.07)]), 10.0)
 
 
 if __name__ == "__main__":
