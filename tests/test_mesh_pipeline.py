@@ -177,6 +177,18 @@ class ACellThatDoesNotExport(unittest.TestCase):
         self.assertIn("US5ZZ9ZZ", p.stdout)
         self.assertFalse((self.work / "out" / "BAD_mesh.json").exists())
 
+    def test_when_the_cell_has_left_the_inventory_its_old_failure_no_longer_blocks(self):
+        # (runs after the two above: unittest takes a class's tests in name order)
+        log = self.work / "data" / "geojson" / "band5" / ".export-errors.log"
+        self.assertIn("US5ZZ9ZZ", log.read_text())
+        shutil.rmtree(self.work / "src" / "ENC_ROOT" / "US5ZZ9ZZ")
+        for staged in (self.work / "data" / "enc" / "all").glob("*/ENC_ROOT/US5ZZ9ZZ"):
+            shutil.rmtree(staged)
+        again = h.run_pipeline(self.work, str(self.work / "src"), "--by-band", "--no-replacements", "--cells-only", "-j", "2")
+        self.assertEqual(again.returncode, 0, again.stdout[-2000:] + again.stderr[-2000:])
+        self.assertIn("GeoJSON fresh", again.stdout, "the three remaining cells were complete: nothing is exported again")
+        self.assertEqual(log.read_text(), "", "the log no longer names a cell that is not in the inventory")
+
 
 if __name__ == "__main__":
     unittest.main()

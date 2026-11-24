@@ -1067,6 +1067,13 @@ def export_to_geojson(
     ]
 
     if not cells_to_process:
+        # Every current cell is complete (its marker holds its version).
+        # A failure logged by an earlier run is then about a cell that has
+        # since left the inventory: it no longer describes this export, and
+        # build-mesh.py refuses a band whose log records a failure.
+        stale_log = geojson_dir / EXPORT_ERROR_LOG
+        if stale_log.exists() and stale_log.stat().st_size:
+            stale_log.write_text("")
         existing = [f for f in geojson_dir.glob("*.geojson")
                     if f.stat().st_size > 100]
         print(f"{tag}GeoJSON fresh ({len(existing)} layers), skipping GDAL")

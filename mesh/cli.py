@@ -150,11 +150,22 @@ def main(argv=None):
     # Absolute: the second stage runs in its own interpreter from the repository folder.
     work = os.path.abspath(a.work or os.path.join("data", "mesh", a.name))
     out = os.path.abspath(a.out)
-    # <work>/tiles is emptied before the build and removed after it: the output must not be it or lie inside it.
-    if os.path.commonpath([os.path.realpath(out), os.path.realpath(os.path.join(work, "tiles"))]) \
-            == os.path.realpath(os.path.join(work, "tiles")):
+    def inside(path, folder):
+        """Is `path` the folder itself or something under it (by real path)?"""
+        path, folder = os.path.realpath(path), os.path.realpath(folder)
+        return os.path.commonpath([path, folder]) == folder
+
+    # <work>/tiles is emptied before the build and removed after it, and <out>/<name>_mesh is removed before it:
+    # neither the output nor a cells folder may be one of them or lie inside one.
+    emptied = os.path.join(work, "tiles")
+    replaced = os.path.join(out, f"{a.name}_mesh")
+    if inside(out, emptied):
         ap.error(f"the output directory {out} is the work directory's tiles folder or lies inside it "
-                 f"({os.path.join(work, 'tiles')}), which the build empties and removes")
+                 f"({emptied}), which the build empties and removes")
+    for d in a.cells:
+        for folder in (emptied, replaced):
+            if inside(d, folder):
+                ap.error(f"the cells folder {d} is {folder} or lies inside it, which the build removes before reading the cells")
     os.makedirs(work, exist_ok=True)
     os.makedirs(out, exist_ok=True)
 

@@ -232,6 +232,17 @@ class HandMadeCells(unittest.TestCase):
             self.assertEqual(p.returncode, 2, p.stdout[-500:] + p.stderr[-500:])
             self.assertIn("tiles folder", p.stderr)
 
+    def test_the_cells_may_not_be_in_a_folder_the_build_removes(self):
+        with tempfile.TemporaryDirectory(prefix="s57meshin-") as tmp:
+            for where, args in ((Path(tmp) / "w" / "tiles" / "geojson", ["--work", str(Path(tmp) / "w"), "-o", str(Path(tmp) / "o")]),
+                                (Path(tmp) / "o" / "X_mesh" / "geojson", ["--work", str(Path(tmp) / "w"), "-o", str(Path(tmp) / "o")])):
+                shutil.copytree(self.own, where)
+                p = subprocess.run([sys.executable, str(h.ROOT / "build-mesh.py"), str(where), "--name", "X", *args],
+                                   cwd=h.ROOT, capture_output=True, text=True)
+                self.assertEqual(p.returncode, 2, p.stdout[-500:] + p.stderr[-500:])
+                self.assertIn("which the build removes before reading the cells", p.stderr)
+                self.assertTrue((where / "band4" / "DEPARE.geojson").exists(), "the cells are untouched")
+
     # -- what is water -----------------------------------------------------
 
     def test_only_charted_water(self):
