@@ -16,7 +16,8 @@ entry that fails any of these):
   chart_build_date  ISO date or null
   bytes, triangles  non-negative numbers
   clusters          non-empty; each with box [west, south, east, north], finite,
-                    west < east and south < north
+                    south < north, longitudes between -180 and 180; west greater
+                    than east is a box across the date line
 
 The archive's top folder is '<name>_mesh/' (build-mesh.py --archive
 writes it so; the plugin unpacks from that folder). With --check-urls
@@ -94,9 +95,12 @@ def validate_entry(e):
     else:
         for i, c in enumerate(cl):
             box = c.get("box") if isinstance(c, dict) else None
+            # west greater than east is a box across the date line (west eastwards to east), as the router reads it.
             if (not isinstance(box, list) or len(box) != 4 or not all(_is_number(v) for v in box)
-                    or not (box[0] < box[2] and box[1] < box[3])):
-                bad.append(f"clusters[{i}].box {box!r}: [west, south, east, north], four finite numbers, west < east, south < north")
+                    or not (box[0] != box[2] and box[1] < box[3]
+                            and -180 <= box[0] <= 180 and -180 <= box[2] <= 180)):
+                bad.append(f"clusters[{i}].box {box!r}: [west, south, east, north], four finite numbers, longitudes "
+                           f"between -180 and 180 and not equal (west > east: across the date line), south < north")
     return bad
 
 

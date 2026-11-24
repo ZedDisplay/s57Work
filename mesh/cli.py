@@ -1,84 +1,77 @@
-"""build-mesh.py — build the navigation mesh of one or more chart files.
+"""build-mesh.py - build the navigation mesh of a district from its chart source cells.
 
-    build-mesh.py 01CGD_ENCs.mbtiles --land land_polygons.shp --catalog ENCProdCat_19115.xml [-o data/tiles]
+    build-mesh.py CELLS [MORE_CELLS ...] --name 01CGD [-o data/tiles] [--work DIR] [-j N]
+                  [--chart-json FILE] [--archive] [--keep-intermediate]
 
-Runs the four stages of the experiment in order, with the same
-intermediate files, under the work directory (default data/mesh/<name>/):
+CELLS is a folder of per-cell GeoJSON exports as s57-to-mbtiles.py writes
+them (data/geojson: bandN/LAYER_CELL.geojson, with data/cancelled-cells.json
+beside the folder). The first folder holds the district's own cells: the
+mesh is built for every 0.25-degree tile those cells reach. Any further
+folders hold other districts' cells, read where they reach those tiles
+(the most detailed chart wins, whichever district it is filed under).
 
-    z16_layers/<LAYER>.pkl        stage 1  decoded tiles: zoom 16, and coarser zooms where
-                                           zoom 16 has no chart coverage (mesh/decode.py)
-    build[/<cluster>]/            stage 3  tile_*.npz, mesh_*.npz, parts.npz, summary.json
-    final[/<cluster>]/            stage 4a finalized mesh_*.npz
-    <out>/<name>_mesh/            stage 4b binary tiles + index.json (the plugin's meshDir)
-    <out>/<name>_mesh.json                 sidecar: provenance, extent, counts, checks
-    <out>/<name>_mesh.tar.zst              with --archive
+    <work>/cells.json, <work>/tiles/    the tile stage (mesh/build.py)
+    <out>/<name>_mesh/                  the mesh: binary tiles + index.json
+    <out>/<name>_mesh.json              sidecar: what it was built from, extent, counts
+    <out>/<name>_mesh.tar.zst           with --archive
 
-The extent is the rectangle around every 0.25° cell holding a z16 tile
-(cells counted from -180°+0.000125°, -90°+0.000125°, so that no tile
-seam lies on the sounding grid's 0.00025° lattice; see mesh/extent.py);
-a district whose cells form separate longitude groups (more than 4° of
-empty columns apart) is built as one mesh per group, each in its own
-sub-folder of <name>_mesh/ listed in <name>_mesh/meshes.json.
+Exit status: 0 built and every check passed; 1 the tile stage failed;
+2 a check of the second stage failed (its message says which and where).
+The sidecar and the archive are written only on 0.
 
-Exit status: 0 built and every gating requirement passed; 2 built but a
-gating requirement failed (the files and the intermediates are left in
-place; --allow-fail turns this into 0); 1 the build itself failed.
-Gating requirements are all of the experiment's checks except "7 angles
->= 20 deg" and "2 layers loaded", which are reported as warnings, plus
-the finalize reverse-edge check, "15 chart coverage loaded" (M_COVR
-with CATCOV=1 in the decoded input, also when --reuse-decoded reads an
-old z16_layers/) and "no tile failed to decode".
+Needs the packages in mesh/requirements.txt, and a C++ compiler with CGAL,
+GMP and MPFR to build mesh/exact_cut.cpp (done here when the program is
+missing or older than its source).
 """
 import argparse
 import datetime as dt
-import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
 import time
 
-from . import MESH_FORMAT_MAGIC, MESH_INDEX_VERSION, decode, extent, finalize, binary
+from . import MESH_FORMAT_MAGIC, MESH_INDEX_VERSION
 
-WARN_ONLY = ("2 ", "7 ")          # requirement names that never gate
-
-
-def sha256(path):
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 24), b""):
-            h.update(chunk)
-    return h.hexdigest()
+HERE = os.path.dirname(os.path.abspath(__file__))
+TILE_DEG = 0.25
 
 
-def land_date(shp):
-    """The data date from the osmdata.openstreetmap.de package README
-    beside the shapefile, or None."""
-    readme = os.path.join(os.path.dirname(os.path.abspath(shp)), "README.txt")
-    if not os.path.exists(readme):
-        return None
-    m = re.search(r"Date of the data used is (\S+)", open(readme).read())
-    return m.group(1) if m else None
-
-
-def default_name(first_input):
-    stem = os.path.splitext(os.path.basename(first_input))[0]
-    return stem[:-5] if stem.endswith("_ENCs") else stem
+def build_cutter(log):
+    """Compile mesh/exact_cut.cpp to mesh/exact_cut when it is missing or older than its source."""
+    src, exe = os.path.join(HERE, "exact_cut.cpp"), os.path.join(HERE, "exact_cut")
+    if os.path.exists(exe) and os.path.getmtime(exe) >= os.path.getmtime(src):
+        return True
+    cxx = os.environ.get("CXX") or shutil.which("c++") or shutil.which("g++") or shutil.which("clang++")
+    if not cxx:
+        log("ERROR: no C++ compiler found (set CXX)")
+        return False
+    cmd = [cxx, "-std=c++17", "-O2"]
+    for d in ("/opt/homebrew/include", "/usr/local/include"):
+        if os.path.isdir(os.path.join(d, "CGAL")):
+            cmd += ["-I", d, "-L", os.path.join(os.path.dirname(d), "lib")]
+            break
+    cmd += [src, "-lgmp", "-lmpfr", "-o", exe]
+    log("compiling the exact cutter: " + " ".join(cmd))
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        log("ERROR: the exact cutter did not compile:\n" + r.stderr[-2000:])
+        return False
+    return True
 
 
 def project_version():
     try:
         import tomllib
-        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                               "pyproject.toml"), "rb") as f:
+        with open(os.path.join(os.path.dirname(HERE), "pyproject.toml"), "rb") as f:
             return tomllib.load(f)["project"]["version"]
     except Exception:
         return None
 
 
 def make_archive(out_dir, folder, log):
+    """<out_dir>/<folder>.tar.zst holding <folder>/ as its top folder."""
     archive = os.path.join(out_dir, folder + ".tar.zst")
     if os.path.exists(archive):
         os.remove(archive)
@@ -90,237 +83,147 @@ def make_archive(out_dir, folder, log):
     return archive
 
 
+def cells_record(work, roots):
+    """Per cells folder, from the tile stage's cell index: the live cells with charted areas, by band, and the
+    cancelled cells left out (the chart build's record beside the folder)."""
+    with open(os.path.join(work, "cells.json")) as f:
+        cells = json.load(f)                     # [rank, band, name, root, bbox, primary, file suffix]
+    out = []
+    for k, root in enumerate(roots):
+        mine = [c for c in cells if c[3] == root]
+        by_band = {}
+        for c in mine:
+            by_band[c[1]] = by_band.get(c[1], 0) + 1
+        cancelled = []
+        cj = os.path.join(os.path.dirname(root.rstrip("/")), "cancelled-cells.json")
+        if os.path.exists(cj):
+            with open(cj) as f:
+                cancelled = sorted(c["cell"].upper() for c in json.load(f).get("cancelled", []))
+        out.append({"folder": root, "role": "own" if k == 0 else "other district",
+                    "cells": len(mine), "cells_by_band": dict(sorted(by_band.items())),
+                    "cancelled_cells_left_out": cancelled})
+    return out
+
+
+def tile_stage_record(work):
+    """Totals of the tile stage (mesh/build.py), from <work>/tiles.json."""
+    with open(os.path.join(work, "tiles.json")) as f:
+        t = json.load(f)
+    ok = [r for r in t["results"] if r["ok"] and r.get("shapes")]
+
+    def km2(key):
+        return round(sum(r[key] for r in ok) / 1e6, 3)
+
+    return {"tiles_reached": len(t["results"]), "tiles_with_chart_shapes": len(ok),
+            "tiles_with_water": sum(1 for r in ok if r["water"]), "seconds": round(t["seconds"], 1),
+            "water_km2": km2("water_m2"), "water_without_depth_km2": km2("nodepth_m2"),
+            "land_km2": km2("land_m2"), "uncharted_km2": km2("nochart_m2"),
+            "same_rank_overlap_km2": km2("same_rank_overlap_m2"),
+            "sides_on_chart_lines": sum(r["line_sides"] for r in ok),
+            "chart_points_as_corners": sum(r["corner_points"] for r in ok)}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="build-mesh.py", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("mbtiles", nargs="+", help="chart file(s); several are decoded as separate sources")
-    ap.add_argument("--land", help="OSM land_polygons.shp (osmdata.openstreetmap.de split package)")
-    ap.add_argument("--catalog", metavar="XML",
-                    help="NOAA's ENC product catalogue (ENCProdCat_19115.xml): a coarser zoom of the chart is not "
-                         "read where a chart cell of any district is rendered deeper (mesh/decode.py)")
-    ap.add_argument("--no-catalog", action="store_true",
-                    help="read coarser zooms by this file's own coverage alone: only for a chart file whose water "
-                         "no other district's file charts, and for tests")
+    ap.add_argument("cells", nargs="+", help="folder(s) of per-cell GeoJSON; the first is the district's own")
+    ap.add_argument("--name", required=True, help="output name, e.g. 01CGD")
     ap.add_argument("-o", "--out", default="data/tiles", help="output directory (default data/tiles)")
-    ap.add_argument("--name", help="output name; default: first input's stem without _ENCs (01CGD_ENCs -> 01CGD)")
     ap.add_argument("--work", help="work directory (default data/mesh/<name>)")
-    ap.add_argument("-j", "--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1),
-                    help="worker processes for decode and tiles (default cpu count - 1)")
-    ap.add_argument("--reuse-decoded", action="store_true",
-                    help="skip stage 1 when <work>/z16_layers already holds pickles")
-    ap.add_argument("--snap-discs", action="store_true",
-                    help="move disc corners within 2 m of another line onto it (off, as in the kept experiment build)")
-    ap.add_argument("--debug-point", action="append", default=[], metavar="LON,LAT",
-                    help="dump the faces and layers at this point to build/debug_<i>_<j>.json (repeatable)")
-    ap.add_argument("--chart-json", action="append", default=[], metavar="FILE",
-                    help="the chart's release .json; its build_date is recorded as chart_build_date")
-    ap.add_argument("--archive", action="store_true", help="also write <name>_mesh.tar.zst")
-    ap.add_argument("--allow-fail", action="store_true", help="exit 0 even when a gating requirement fails")
+    ap.add_argument("-j", "--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
+    ap.add_argument("--chart-json", metavar="FILE",
+                    help="the published chart's metadata JSON; its build_date is recorded as chart_build_date")
+    ap.add_argument("--archive", action="store_true", help="also write <name>_mesh.tar.zst (needs tar --zstd)")
     ap.add_argument("--keep-intermediate", action="store_true",
-                    help="keep z16_layers/, build/ and final/ (default: removed when every gating requirement passes, kept otherwise)")
-    ap.add_argument("--box", metavar="W,S,E,N",
-                    help="diagnostic: mesh exactly this rectangle (tile grid from its south-west corner, "
-                         "as the experiment's D1 box) instead of the rectangle derived from the z16 cells")
-    ap.add_argument("--tile-deg", type=float, default=extent.TILE_DEG, help=argparse.SUPPRESS)
+                    help="keep <work>/tiles (the cut of every tile) after a successful build")
     a = ap.parse_args(argv)
-
-    for p in a.mbtiles:
-        if not os.path.exists(p):
-            ap.error(f"no such file: {p}")
-    if a.land and not os.path.exists(a.land):
-        ap.error(f"no such file: {a.land}")
-    if a.catalog and a.no_catalog:
-        ap.error("--catalog and --no-catalog exclude each other")
-    if a.catalog and not os.path.exists(a.catalog):
-        ap.error(f"no such file: {a.catalog}")
-    # No default: forgetting the catalogue would quietly let a district's coarse cells speak for the next
-    # district's water (the meshes published on 2026-11-21). --reuse-decoded reads pickles and decodes nothing.
-    if not a.catalog and not a.no_catalog and not a.reuse_decoded:
-        ap.error("give --catalog ENCProdCat_19115.xml (https://charts.noaa.gov/ENCs/ENCProdCat_19115.xml), "
-                 "or --no-catalog to read coarser zooms by this file's coverage alone")
-    name = a.name or default_name(a.mbtiles[0])
-    work = a.work or os.path.join("data", "mesh", name)
+    for d in a.cells:
+        if not os.path.isdir(d):
+            ap.error(f"no such folder: {d}")
+    chart_meta = None
+    if a.chart_json:
+        try:
+            with open(a.chart_json) as f:
+                chart_meta = json.load(f)
+        except (OSError, ValueError) as ex:
+            ap.error(f"--chart-json {a.chart_json}: {ex}")
+    # Absolute: the second stage runs in its own interpreter from the repository folder.
+    work = os.path.abspath(a.work or os.path.join("data", "mesh", a.name))
+    out = os.path.abspath(a.out)
     os.makedirs(work, exist_ok=True)
-    os.makedirs(a.out, exist_ok=True)
-    logf = open(os.path.join(work, "build.log"), "a")
+    os.makedirs(out, exist_ok=True)
 
     def log(msg=""):
         print(msg, flush=True)
-        logf.write(msg + "\n"); logf.flush()
 
-    t_start = time.time()
     started = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    log(f"build-mesh {started}: {', '.join(a.mbtiles)} -> {a.out}/{name}_mesh  (work {work}, workers {a.workers})")
-    if not a.land:
-        log("WARNING: no --land: land comes from the charts' LNDARE only")
-
-    # ---- stage 1: decode z16
-    pkl = os.path.join(work, "z16_layers")
-    catalog = None
-    if a.reuse_decoded and os.path.isdir(pkl) and any(f.endswith(".pkl") for f in os.listdir(pkl)):
-        log(f"stage 1: reusing decoded layers in {pkl}")
-        dec = {"tiles": None, "by_zoom": None, "failed": [], "pieces": None, "left_to_finer": None, "reused": True}
-    else:
-        if not a.catalog and not a.no_catalog:
-            log(f"ERROR: --reuse-decoded, but {pkl} holds no decoded layers; decoding needs --catalog or --no-catalog")
-            return 1
-        if os.path.isdir(pkl):
-            shutil.rmtree(pkl)
-        catalog_cells = None
-        if a.catalog:
-            catalog_cells = decode.read_catalog_cells(a.catalog)
-            if not catalog_cells:
-                log(f"ERROR: no chart cell outline read from {a.catalog}")
-                return 1
-            catalog = {"file": os.path.basename(a.catalog), "bytes": os.path.getsize(a.catalog),
-                       "sha256": sha256(a.catalog), "cell_outlines": len(catalog_cells)}
-            log(f"catalogue {a.catalog}: {len(catalog_cells):,} cell outlines")
-        else:
-            log("WARNING: --no-catalog: coarser zooms are read wherever this file has no finer coverage, "
-                "also where another district's file charts the water in detail")
-        log("stage 1: decoding the tiles (zoom 16, and coarser zooms where no finer chart covers)")
-        dec = decode.decode_to_pickles(a.mbtiles, pkl, a.workers, log=log, catalog_cells=catalog_cells)
-
-    # ---- stage 2: extent
-    cells = decode.z16_cells(a.mbtiles, a.tile_deg, lambda lon, lat: extent.cell(lon, lat, a.tile_deg))
-    if not cells:
-        log("ERROR: the input has no z16 tiles; nothing to mesh")
-        return 1
-    if a.box:
-        cl = [extent.Cluster.from_box([float(v) for v in a.box.split(",")], a.tile_deg)]
-        log(f"stage 2: --box override; {len(cells)} cells of {a.tile_deg} deg hold z16 tiles")
-    else:
-        cl = extent.clusters(cells, a.tile_deg)
-        log(f"stage 2: {len(cells)} cells of {a.tile_deg} deg hold z16 tiles -> {len(cl)} cluster(s)")
-    for c in cl:
-        log(f"  cluster {c.slug}: box {c.box}  {c.nx}x{c.ny} = {c.nx*c.ny} tiles ({len(c.cells)} with z16)  K {c.k:.6f}")
-
-    # ---- stages 3 and 4 per cluster
-    from . import build as B                                # imports numpy/shapely/triangle
-    mesh_dir = os.path.join(a.out, f"{name}_mesh")
+    t0 = time.time()
+    side_path = os.path.join(out, f"{a.name}_mesh.json")
+    archive_path = os.path.join(out, f"{a.name}_mesh.tar.zst")
+    mesh_dir = os.path.join(out, f"{a.name}_mesh")
+    # Nothing of an earlier build of this name may be taken for this one's result.
+    for p in (side_path, archive_path):
+        if os.path.exists(p):
+            os.remove(p)
     if os.path.isdir(mesh_dir):
         shutil.rmtree(mesh_dir)
-    os.makedirs(mesh_dir)
-    multi = len(cl) > 1
-    source = [os.path.basename(p) for p in a.mbtiles]
-    debug_points = [tuple(float(v) for v in s.split(",")) for s in a.debug_point]
-    results = []
-    failures = []
-    warnings = []
-    for c in cl:
-        sub = c.slug if multi else ""
-        bdir = os.path.join(work, "build", sub) if sub else os.path.join(work, "build")
-        fdir = os.path.join(work, "final", sub) if sub else os.path.join(work, "final")
-        odir = os.path.join(mesh_dir, sub) if sub else mesh_dir
-        for d in (bdir, fdir):
-            if os.path.isdir(d):
-                shutil.rmtree(d)
-        log(f"\nstage 3: build {c.slug} -> {bdir}")
-        config = dict(box_=c.box, out=bdir, land=a.land, pkl=pkl, tile=a.tile_deg, snap=a.snap_discs,
-                      debug_points=debug_points)
-        try:
-            # Two fresh interpreters: the tile stage, then the global
-            # refinement, so the refinement (the memory peak) does not
-            # inherit the tile stage's heap. Their output goes to stdout and
-            # to the same build.log as this process.
-            summ = B.run_fresh(config, a.workers, log_path=os.path.join(work, "build.log"))
-        except B.BuildError as ex:
-            log(f"ERROR: {ex}")
-            return 1
-        log(f"\nstage 4a: finalize {c.slug} -> {fdir}")
-        fin = finalize.finalize(bdir, fdir, log=log)
-        log(f"\nstage 4b: binary tiles {c.slug} -> {odir}")
-        idx = binary.write_binary(fdir, odir, c.box, a.tile_deg, source, log=log)
-        for rname, passed, detail in summ["requirements"]:
-            if not passed:
-                (warnings if rname.startswith(WARN_ONLY) else failures).append((c.slug, rname, detail))
-        if fin["links_bad_reverse"]:
-            failures.append((c.slug, "reverse edges", f"{fin['links_bad_reverse']} links whose reverse edge does not point back"))
-        results.append({"cluster": c.slug, "dir": sub or ".", **c.describe(),
-                        "triangles": idx["triangles"], "vertices": summ["vertices"],
-                        "tiles_built": summ["tiles"], "mesh_tiles": len(idx["tiles"]),
-                        "bytes": idx["bytes"], "water_parts": summ["water_parts"],
-                        "layers": summ["layers"], "peak_rss_mb": summ["peak_rss_mb"],
-                        "timings": {**summ["timings"], "total": summ["t_total"],
-                                    "finalize": fin["seconds"]},
-                        "requirements": [{"name": n, "pass": p, "detail": d} for n, p, d in summ["requirements"]],
-                        "not_covered_examples": summ["not_covered_examples"]})
-    if multi:
-        with open(os.path.join(mesh_dir, "meshes.json"), "w") as f:
-            json.dump({"version": 1, "name": name,
-                       "meshes": [{"dir": r["dir"], "box": r["box"], "triangles": r["triangles"]} for r in results]},
-                      f, indent=1)
-    if dec["failed"]:
-        # A tile that does not decode drops its hazards, depth areas and land
-        # silently; nothing downstream can detect that, so it gates.
-        failures.append(("decode", "tiles failed to decode",
-                         f"{len(dec['failed'])}: {dec['failed'][:5]}"))
+    if not build_cutter(log):
+        return 1
+    from . import build
+    tiles_dir = os.path.join(work, "tiles")
+    if os.path.isdir(tiles_dir):
+        shutil.rmtree(tiles_dir)
+    if os.path.exists(os.path.join(work, "cells.json")):
+        os.remove(os.path.join(work, "cells.json"))
+    roots = [os.path.abspath(d) for d in a.cells]
+    try:
+        failed = build.run(work, a.workers, roots, log=log)
+    except RuntimeError as ex:               # the cells folders are not what the chart build exports
+        log(f"ERROR: {ex}")
+        return 1
+    if failed:
+        log("the tile stage failed")
+        return 1
+    r = subprocess.run([sys.executable, "-m", "mesh.finalize", work, mesh_dir, str(a.workers), a.name],
+                       cwd=os.path.dirname(HERE))
+    if r.returncode != 0:
+        log(f"build-mesh: the second stage stopped (status {r.returncode}) after {time.time() - t0:.0f} s; "
+            f"no sidecar written; the tile stage's files are kept in {work}")
+        return 2
 
-    # ---- sidecar
-    chart_meta = []
-    for p in a.chart_json:
-        try:
-            with open(p) as f:
-                chart_meta.append(json.load(f))
-        except Exception as ex:
-            warnings.append(("chart-json", p, str(ex)))
-    build_dates = sorted(m.get("build_date") for m in chart_meta if m.get("build_date"))
+    with open(os.path.join(mesh_dir, "index.json")) as f:
+        idx = json.load(f)
+    nbytes = sum(os.path.getsize(os.path.join(mesh_dir, t["file"])) for t in idx["tiles"])
     side = {
-        "name": name,
-        "mesh_dir": f"{name}_mesh",
+        "name": a.name,
+        "mesh_dir": f"{a.name}_mesh",
         "format": {"magic": MESH_FORMAT_MAGIC, "index_version": MESH_INDEX_VERSION,
-                   "tile_deg": a.tile_deg, "multi_cluster": multi},
+                   "tile_deg": TILE_DEG, "multi_cluster": False},
         "build_date": started,
-        "build_seconds": round(time.time() - t_start, 1),
+        "build_seconds": round(time.time() - t0, 1),
         "builder_version": project_version(),
         "workers": a.workers,
-        "snap_discs": a.snap_discs,
-        "box_override": a.box,
-        "sources": [{"file": os.path.basename(p), "bytes": os.path.getsize(p), "sha256": sha256(p)}
-                    for p in a.mbtiles],
-        "chart_build_date": build_dates[-1] if build_dates else None,
-        "chart_metadata": chart_meta or None,
-        "land_polygons": {"file": os.path.basename(a.land), "date": land_date(a.land)} if a.land else None,
-        # Zoom 16 alone, as before 2026-11-21, so the figure compares across builds; every zoom is in the next key.
-        "z16_tiles_decoded": dec["by_zoom"].get(decode.ZOOM, 0) if dec["by_zoom"] is not None else None,
-        "tiles_decoded_by_zoom": ({str(z): n for z, n in dec["by_zoom"].items()}
-                                  if dec["by_zoom"] is not None else None),
-        # The catalogue the coarser zooms were held back by (null: --no-catalog, or the layers were reused), and
-        # the coarser tiles left whole to a finer chart of another file.
-        "catalog": catalog,
-        "tiles_left_to_finer_charts": dec["left_to_finer"],
-        "z16_cells": len(cells),
-        "clusters": results,
-        "triangles": sum(r["triangles"] for r in results),
-        "mesh_tiles": sum(r["mesh_tiles"] for r in results),
-        "bytes": sum(r["bytes"] for r in results),
-        "gating_failures": [{"cluster": c, "name": n, "detail": d} for c, n, d in failures],
-        "warnings": [{"cluster": c, "name": n, "detail": d} for c, n, d in warnings],
-        "passed": not failures,
+        "cells": cells_record(work, roots),
+        "chart_build_date": (chart_meta or {}).get("build_date"),
+        "chart_metadata": chart_meta,
+        "tile_stage": tile_stage_record(work),
+        "clusters": [{"dir": ".", "box": [idx["west"], idx["south"], idx["east"], idx["north"]],
+                      "x_scale": idx["xScale"], "triangles": idx["triangles"], "mesh_tiles": len(idx["tiles"])}],
+        "triangles": idx["triangles"],
+        "mesh_tiles": len(idx["tiles"]),
+        "bytes": nbytes,
+        # The second stage exits non-zero on any failed check (mesh/finalize.py lists them), and then no
+        # sidecar is written: a sidecar exists only for a mesh that passed every one.
+        "passed": True,
     }
-    side_path = os.path.join(a.out, f"{name}_mesh.json")
     with open(side_path, "w") as f:
         json.dump(side, f, indent=1)
-    log(f"\nsidecar: {side_path}")
-
+    log(f"sidecar: {side_path}")
     if a.archive:
-        arc = make_archive(a.out, f"{name}_mesh", log)
-        log(f"archive: {arc} ({os.path.getsize(arc)/1e6:.0f} MB)")
-
-    if not a.keep_intermediate and not failures:
-        for d in ("z16_layers", "build", "final"):
-            shutil.rmtree(os.path.join(work, d), ignore_errors=True)
-    elif failures and not a.keep_intermediate:
-        log(f"intermediates kept in {work} for diagnosis (a gating requirement failed)")
-
-    log(f"\n==== {name}: {side['triangles']:,} triangles in {side['mesh_tiles']} tiles, "
-        f"{side['bytes']/1e6:.0f} MB, {time.time()-t_start:.0f} s")
-    for c, n, d in warnings:
-        log(f"WARN  [{c}] {n}: {d}")
-    for c, n, d in failures:
-        log(f"FAIL  [{c}] {n}: {d}")
-    if failures:
-        log(f"{len(failures)} gating requirement(s) failed" + (" (--allow-fail)" if a.allow_fail else ""))
-        return 0 if a.allow_fail else 2
-    log("all gating requirements passed")
+        arc = make_archive(out, f"{a.name}_mesh", log)
+        log(f"archive: {arc} ({os.path.getsize(arc) / 1e6:.0f} MB)")
+    if not a.keep_intermediate:
+        shutil.rmtree(tiles_dir, ignore_errors=True)
+    log(f"build-mesh: {a.name}: {side['triangles']:,} triangles in {side['mesh_tiles']} tiles, "
+        f"{nbytes / 1e6:.0f} MB, {time.time() - t0:.0f} s")
     return 0

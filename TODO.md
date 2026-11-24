@@ -1,5 +1,25 @@
 # TODO
 
+- **Mesh build from source cells: what is still owed** (2026-11-24). The
+  build in `mesh/` was replaced (CHANGELOG, `docs/MESH.md`). Owed:
+  1. `.github/workflows/build-mesh.yml` is rewritten (cells job per
+     district with `s57-to-mbtiles.py --cells-only`, then the build) and
+     has never run: a test run (`publish: test`) is owed, which also shows
+     whether the cutter compiles with the CGAL Ubuntu installs.
+  2. The router (signalk-weather-router-plus) reads `WRPMESH1` only.
+     Nothing in the new format may be published under the existing names
+     before the router reads `WRPMESH2`.
+  3. Not built with the new build: 05, 08, 09, 11, 13, 14CGD. 14CGD's water
+     lies on both sides of the Pacific and one rectangle around it spans
+     most of the globe; 17CGD crosses the antimeridian.
+  4. The mesh items below describe the old build (`mesh/decode.py`,
+     `mesh/binary.py`, z16 tiles, the full flags byte). Their questions
+     remain where they still apply: why a triangle has no depth (the new
+     mesh holds only charted water, so "no chart" is gone; unsurveyed
+     water and depth areas without a value remain), and a fixed span with
+     no charted height (now a side or triangle with `clear` -999; the
+     format has room for a flag).
+
 - **Docstrings for CodeRabbit's coverage check** (PR #8, 2026-10-15). CodeRabbit's
   default "Docstring Coverage" pre-merge check wants 80% on functions a PR touches;
   PR #8 scored 16.67%, mostly test methods, which carry no docstrings in this repo.

@@ -2,12 +2,13 @@
 """
 count-mesh-triangles.py — what a navigation mesh holds inside a box
 
-Reads a mesh folder (index.json + WRPMESH1 tiles, see docs/MESH.md) and
-reports, for each box, the triangles whose centroid lies inside it:
-count, navigable count, depth known / unknown, hazards, marks, and the
-mesh area in km². Use it to compare two builds of the same place (the
-experiment's mesh against a CI build, two months' meshes), or to see
-whether a place is covered at all.
+Reads a mesh folder (index.json + tiles, see docs/MESH.md) and reports,
+for each box, the triangles whose centroid lies inside it: count,
+navigable count, depth known / unknown, hazards, marks, and the mesh
+area in km². Use it to compare two builds of the same place, or to see
+whether a place is covered at all. Reads both tile formats: WRPMESH2
+(marks are corners: "mark" counts the triangles with a marked corner)
+and the earlier WRPMESH1 (marks were a triangle flag).
 
 Usage:
   count-mesh-triangles.py MESH_DIR --box W,S,E,N [--box ...]
@@ -32,7 +33,7 @@ R_EARTH_M = 6_371_008.8
 def read_tile(path, n):
     with open(path, "rb") as f:
         head = f.read(HEADER)
-        if head[:8] != b"WRPMESH1":
+        if head[:8] not in (b"WRPMESH1", b"WRPMESH2"):
             raise ValueError(f"{path}: bad magic")
         if struct.unpack("<I", head[8:12])[0] != n:
             raise ValueError(f"{path}: triangle count differs from index.json")
@@ -44,7 +45,13 @@ def read_tile(path, n):
         f.seek(n * 4, 1)                                      # hazv
         f.seek(n * 3, 1)                                      # rev
         flags = np.frombuffer(f.read(n), dtype=np.uint8)
-    return corners, depth, flags
+        if head[:8] == b"WRPMESH1":
+            mark = (flags & 4) > 0
+        else:
+            f.seek(n * 3 + n * 12 + n * 12, 1)                # sideFlags, sideClear, sideHazv
+            corner_flags = np.frombuffer(f.read(n * 3), dtype=np.uint8).reshape(n, 3)
+            mark = ((corner_flags & 2) > 0).any(axis=1)       # cornerFlagBits.mark
+    return corners, depth, flags, mark
 
 
 def measure(mesh_dir, boxes):
@@ -57,7 +64,7 @@ def measure(mesh_dir, boxes):
         hits = [b for b in boxes if not (bb[2] < b[0] or bb[0] > b[2] or bb[3] < b[1] or bb[1] > b[3])]
         if not hits:
             continue
-        corners, depth, flags = read_tile(os.path.join(mesh_dir, t["file"]), t["n"])
+        corners, depth, flags, mark = read_tile(os.path.join(mesh_dir, t["file"]), t["n"])
         cen = corners.mean(axis=1)
         lon = cen[:, 0] / K; lat = cen[:, 1]
         # area in the mesh's own frame (x = lon*K deg, y = lat deg) -> km²
@@ -75,7 +82,7 @@ def measure(mesh_dir, boxes):
             r["navigable"] += int((flags[m] & 1).sum())
             r["depth_known"] += int((depth[m] != -999).sum())
             r["hazard"] += int(((flags[m] & 2) > 0).sum())
-            r["mark"] += int(((flags[m] & 4) > 0).sum())
+            r["mark"] += int(mark[m].sum())
             r["area_km2"] += float(area_km2[m].sum())
     return idx, out
 

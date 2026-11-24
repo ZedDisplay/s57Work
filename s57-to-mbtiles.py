@@ -25,6 +25,9 @@ BY-BAND (recommended for multi-state regions):
 SKIP GDAL (use existing GeoJSON):
   %(prog)s --geojson-dir ./data/geojson/band3/ --minzoom 11 --maxzoom 12
 
+CELLS ONLY (the input of build-mesh.py; by-band stages 1-2, no tiles):
+  %(prog)s 01CGD_ENCs.zip --by-band --cells-only
+
 ─────────────────────────────────────────────────────────────────────────────
 PIPELINE (per band or source)
   1. Extract ZIPs → data/enc/
@@ -349,6 +352,13 @@ Skip GDAL (use existing GeoJSON):
     parser.add_argument("--no-replacements", action="store_true",
                         help="Do not fetch the reschemed cells that replace "
                              "cancelled ones from NOAA's catalog (by-band)")
+    parser.add_argument("--cells-only", action="store_true",
+                        help="Stop after the GDAL export (by-band): "
+                             "data/geojson/bandN/ holds every live cell of "
+                             "every band, band 6 included, and "
+                             "data/cancelled-cells.json the cells left out. "
+                             "This is what build-mesh.py reads; tippecanoe "
+                             "is not needed")
     parser.add_argument("--pmtiles", action="store_true",
                         help="Also write a PMTiles archive of the final "
                              "tileset beside it (same tiles, layers and "
@@ -433,11 +443,12 @@ def find_container_runtime() -> Optional[str]:
 
 
 def check_deps(need_gdal: bool = True,
-               need_pmtiles: bool = False) -> Tuple[bool, Optional[str]]:
+               need_pmtiles: bool = False,
+               need_tippecanoe: bool = True) -> Tuple[bool, Optional[str]]:
     errors = []
-    if not shutil.which("tippecanoe"):
+    if need_tippecanoe and not shutil.which("tippecanoe"):
         errors.append("tippecanoe not found.")
-    if not shutil.which("tile-join"):
+    if need_tippecanoe and not shutil.which("tile-join"):
         errors.append("tile-join not found.")
     if need_pmtiles and not shutil.which("pmtiles"):
         errors.append("pmtiles not found (go-pmtiles); needed for --pmtiles.")
@@ -2711,10 +2722,12 @@ def prepare_band(
     native_gdal: bool,
     runtime: Optional[str],
     max_workers: int,
+    cells_only: bool = False,
 ) -> Optional[RenderSource]:
     """Run stages 2-3 (GDAL export, consolidate) for a single band and
     return it as a render source; tiling happens in process_by_band once
-    every band's footprints are known."""
+    every band's footprints are known. With cells_only the band stops
+    after the export and nothing is returned."""
     label = f"band{band}-{desc}"
     print(f"\n-- Band {band}: {desc} ({scale})  z{effective_min}-{effective_max} --")
 
@@ -2750,6 +2763,8 @@ def prepare_band(
         band_enc_dir, band_geojson_dir, band_cells, label=label,
         native_gdal=native_gdal, runtime=runtime, max_workers=max_workers,
         data_dir=data_dir)
+    if cells_only:
+        return None
 
     # Stage 2b: clip legacy cells under reschemed cells of the same band
     # (see the Stage 2b section). Returns per-cell file overrides for
@@ -2800,12 +2815,15 @@ def process_by_band(
     max_workers: int,
     replacements: bool = True,
     catalog_path: Optional[Path] = None,
+    cells_only: bool = False,
 ) -> Tuple[List[Path], Optional[int]]:
     """The by-band pipeline: stage inputs, drop cancelled cells and fetch
     their replacements, export per band, resolve same-band overlaps,
     consolidate, erase finer coverage, tile each render run, clip bands
     1-2 to the district region. Returns the tilesets for tile-join and
-    the bundle's scale (bundle_scale; None when unknown)."""
+    the bundle's scale (bundle_scale; None when unknown). With cells_only
+    it stops after the export of every band (band 6 included: no zoom
+    range applies when nothing is rendered) and returns no tilesets."""
     print("\n-- By-band mode ---------------------------------------------------")
 
     # Stage 1: stage all inputs
@@ -2884,7 +2902,7 @@ def process_by_band(
         # runner disk on Pacific districts (band 1 of 14CGD at z16 =
         # tiling the whole Pacific EEZ at harbour zoom).
         effective_min, effective_max = band_render_range(band, minzoom, maxzoom)
-        if effective_min > effective_max:
+        if effective_min > effective_max and not cells_only:
             continue
         band_tasks.append((band, by_band[band], effective_min, effective_max,
                            desc, scale))
@@ -2903,7 +2921,7 @@ def process_by_band(
         for band, files, emin, emax, desc, scale in band_tasks:
             _collect(prepare_band(
                 band, files, data_dir, emin, emax, desc, scale,
-                native_gdal, runtime, max_workers))
+                native_gdal, runtime, max_workers, cells_only))
     else:
         with ThreadPoolExecutor(max_workers=min(len(band_tasks),
                                                 max_workers)) as pool:
@@ -2911,7 +2929,8 @@ def process_by_band(
             for band, files, emin, emax, desc, scale in band_tasks:
                 f = pool.submit(prepare_band, band, files, data_dir,
                                 emin, emax, desc, scale,
-                                native_gdal, runtime, max_workers)
+                                native_gdal, runtime, max_workers,
+                                cells_only)
                 futures[f] = band
             for future in as_completed(futures):
                 exc = future.exception()
@@ -2920,6 +2939,9 @@ def process_by_band(
                           file=sys.stderr)
                     sys.exit(1)
                 _collect(future.result())
+
+    if cells_only:
+        return [], cscl
 
     if not sources:
         print("ERROR: No charts to render", file=sys.stderr)
@@ -3078,6 +3100,11 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
+    if args.cells_only and not args.by_band:
+        parser.error("--cells-only needs --by-band")
+    if args.cells_only and args.pmtiles:
+        parser.error("--cells-only writes no tileset; --pmtiles cannot be used with it")
+
     data_dir = setup_data_dir()
     out_name = resolve_output_name(args)
     tiles_path = data_dir / "tiles" / out_name
@@ -3089,7 +3116,8 @@ def main():
         prod_path = prod_dir / out_name
 
     native_gdal, runtime = check_deps(
-        need_gdal=not args.geojson_dir, need_pmtiles=args.pmtiles)
+        need_gdal=not args.geojson_dir, need_pmtiles=args.pmtiles,
+        need_tippecanoe=not args.cells_only)
     if not native_gdal and runtime:
         pull_image(runtime, GDAL_IMAGE)
 
@@ -3110,7 +3138,19 @@ def main():
             input_paths, data_dir, args.minzoom, args.maxzoom,
             native_gdal, runtime, args.jobs,
             replacements=not args.no_replacements,
-            catalog_path=Path(args.catalog).resolve() if args.catalog else None)
+            catalog_path=Path(args.catalog).resolve() if args.catalog else None,
+            cells_only=args.cells_only)
+
+        if args.cells_only:
+            geojson_dir = data_dir / "geojson"
+            print("\nCells exported (no tiles built):")
+            for band_dir in sorted(geojson_dir.glob("band[1-6]")):
+                cells = [m for m in band_dir.glob(".*.exported")]
+                print(f"  {band_dir.name}: {len(cells)} cell(s)")
+            print(f"  Cells: {geojson_dir.resolve()}/")
+            print(f"  Cancelled cells left out: "
+                  f"{(data_dir / 'cancelled-cells.json').resolve()}")
+            return
 
         if len(tile_files) == 1:
             shutil.copy2(tile_files[0], tiles_path)

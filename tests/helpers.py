@@ -47,6 +47,71 @@ HAVE_GDAL = bool(shutil.which("ogr2ogr") and shutil.which("ogrinfo"))
 HAVE_TIPPECANOE = bool(shutil.which("tippecanoe") and shutil.which("tile-join")
                        and shutil.which("tippecanoe-decode"))
 HAVE_PMTILES = bool(shutil.which("pmtiles"))
+# The mesh build compiles mesh/exact_cut.cpp: a C++ compiler and CGAL's
+# headers. Where both are present a compile failure fails the test.
+HAVE_CGAL = bool((shutil.which("c++") or shutil.which("g++") or shutil.which("clang++"))
+                 and any((Path(d) / "CGAL").is_dir() for d in
+                         ("/usr/include", "/usr/local/include", "/opt/homebrew/include")))
+
+MESH_HEADER = 32
+# corners f64[6], neighbours i32[3], mult, depth, clear, hazv f32, rev i8[3], flags u8,
+# sideFlags u8[3], sideClear f32[3], sideHazv f32[3], cornerFlags u8[3], cornerVal f32[3]
+MESH_BYTES_PER_TRIANGLE = 48 + 12 + 4 + 4 + 4 + 4 + 3 + 1 + 3 + 12 + 12 + 3 + 12
+
+
+def read_mesh(mesh_dir: Path) -> dict:
+    """A mesh folder (index.json + WRPMESH2 tiles, docs/MESH.md) as one set
+    of arrays over all its triangles, in id order; `lonlat` is the corners
+    in degrees as stored (x divided by the index's xScale: between -180 and
+    180, also in a mesh across the date line); `tile_of` is each triangle's
+    place in the index's tile list. Checks each tile's magic, count, origin
+    and exact length on the way. Needs numpy."""
+    import struct
+    import numpy as np
+    idx = json.loads((mesh_dir / "index.json").read_text())
+    cols = {k: [] for k in ("corners", "neighbours", "mult", "depth", "clear", "hazv", "rev", "flags",
+                            "side_flags", "side_clear", "side_hazv", "corner_flags", "corner_val")}
+    first = 0
+    for t in idx["tiles"]:
+        raw = (mesh_dir / t["file"]).read_bytes()
+        n = t["n"]
+        assert raw[:8] == b"WRPMESH2", t["file"]
+        assert len(raw) == MESH_HEADER + MESH_BYTES_PER_TRIANGLE * n, t["file"]
+        count, ox, oy = struct.unpack("<Idd", raw[8:28])
+        assert count == n, t["file"]
+        # columns count east from the index's west; a tile east of the date line has its origin from -180
+        want = idx["west"] + t["i"] * idx["tileDeg"]
+        assert abs(ox - (want - 360 if want >= 180 else want)) < 1e-9, t["file"]
+        assert abs(oy - (idx["south"] + t["j"] * idx["tileDeg"])) < 1e-9, t["file"]
+        assert t["first"] == first, "ids are contiguous per tile in file order"
+        first += n
+        o = MESH_HEADER
+        for key, dtype, per in (("corners", "<f8", 6), ("neighbours", "<i4", 3), ("mult", "<f4", 1),
+                                ("depth", "<f4", 1), ("clear", "<f4", 1), ("hazv", "<f4", 1), ("rev", "i1", 3),
+                                ("flags", "u1", 1), ("side_flags", "u1", 3), ("side_clear", "<f4", 3),
+                                ("side_hazv", "<f4", 3), ("corner_flags", "u1", 3), ("corner_val", "<f4", 3)):
+            a = np.frombuffer(raw, dtype, n * per, o)
+            o += a.nbytes
+            cols[key].append(a.reshape(n, per) if per > 1 else a)
+    m = {k: np.concatenate(v) for k, v in cols.items()}
+    m["tile_of"] = np.concatenate([np.full(t["n"], k, dtype=np.int64) for k, t in enumerate(idx["tiles"])])
+    m["corners"] = m["corners"].reshape(-1, 3, 2)
+    m["lonlat"] = m["corners"] / np.array([idx["xScale"], 1.0])
+    m["index"] = idx
+    return m
+
+
+def mesh_triangle_at(m: dict, lon: float, lat: float):
+    """The id of the mesh triangle holding a point, or None (not water)."""
+    import numpy as np
+    p = m["lonlat"]
+    a, b, c = p[:, 0], p[:, 1], p[:, 2]
+
+    def side(u, v):
+        return (v[:, 0] - u[:, 0]) * (lat - u[:, 1]) - (v[:, 1] - u[:, 1]) * (lon - u[:, 0])
+    d1, d2, d3 = side(a, b), side(b, c), side(c, a)
+    hit = np.flatnonzero((d1 >= 0) & (d2 >= 0) & (d3 >= 0))
+    return int(hit[0]) if len(hit) else None
 
 
 def pmtiles_metadata(archive: Path) -> dict:

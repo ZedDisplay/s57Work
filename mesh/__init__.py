@@ -1,28 +1,35 @@
-"""Navigation mesh built from the z16 tiles of a finished chart file.
+"""Navigation mesh built from the chart source cells (S-57), cut exactly.
 
-The mesh is a constrained Delaunay triangulation of charted water, one
-0.25° tile at a time, with per-triangle depth, clearance, hazard, mark
-and zone labels, written in the flat binary tile format (magic
-``WRPMESH1``, index version 1) that the signalk-weather-router-plus
-router reads from a folder.
+The mesh is a triangulation of charted water with, per triangle, the
+chart's depth, clearance, hazard, structure, fairway and dredged values;
+per triangle side, the mark of a chart line lying on it (a structure, a
+hazard, an overhead clearance, a recommended track, a navigation line);
+and per corner, the mark of a chart point there (a hazard with its depth,
+a mark, a sounding). It is written as flat binary tiles (magic
+``WRPMESH2``, index version 2) in a folder.
 
-Pipeline (``build-mesh.py``):
+Build (``build-mesh.py``, mesh/cli.py):
 
-1. ``decode``   — decode every z16 tile of the .mbtiles into per-layer
-                  geometry lists, the way the old grid build read them
-2. ``extent``   — the 0.25° cells that hold any z16 tile, grouped into
-                  longitude clusters; each cluster gets its own
-                  projection scale (cos of its mid-latitude)
-3. ``build``    — per tile: band merge, boundaries, noding, classify and
-                  dissolve, CDT, PSLG; then seam weld, one global quality
-                  refinement (Triangle q20), neighbours, split into tile
-                  files, checks
-4. ``finalize`` — reverse edges, labels per triangle, contiguous ids,
-                  binary tiles + index.json
+1. ``build``    - per 0.25-degree tile: read every chart cell that reaches
+                  the tile, in the source's own whole numbers (units of
+                  1e-7 degree); cut all of it exactly (exact_cut.cpp,
+                  CGAL's exact kernel); take each triangle's values from
+                  the shapes the cut says it is inside. The most detailed
+                  chart wins. Chart lines stay lines, chart points stay
+                  points; nothing is drawn around them.
+2. ``finalize`` - join the tiles; decide once, for the whole mesh, which
+                  points are real corners; one well-shaping run (Triangle
+                  q20); neighbours, side and corner marks, the shore
+                  multiplier; the checks, every one a gate, including
+                  every finished triangle tested exactly against the cut;
+                  the binary tiles and index.json.
 
-Nothing here is district-specific: the extent, the projection and the
-sounding-grid origin all follow from the input file.
+The mesh covers wherever the district's own cells have charted water.
+Nothing here is district-specific.
+
+exact_cut.cpp uses CGAL's 2D triangulation package, which is licensed
+GPL-3.0-or-later; it is a separate program, run by mesh/build.py.
 """
 
-MESH_FORMAT_MAGIC = "WRPMESH1"
-MESH_INDEX_VERSION = 1
+MESH_FORMAT_MAGIC = "WRPMESH2"
+MESH_INDEX_VERSION = 2

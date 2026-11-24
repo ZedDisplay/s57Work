@@ -17,6 +17,9 @@ data/*.mbtiles
 # CI downloads
 downloads/
 
+# The exact cutter, compiled from mesh/exact_cut.cpp by build-mesh.py
+mesh/exact_cut
+
 # Python
 __pycache__/
 *.pyc
