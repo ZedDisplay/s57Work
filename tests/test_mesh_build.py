@@ -232,6 +232,22 @@ class HandMadeCells(unittest.TestCase):
             self.assertEqual(p.returncode, 2, p.stdout[-500:] + p.stderr[-500:])
             self.assertIn("tiles folder", p.stderr)
 
+    def test_an_output_given_through_a_link_is_written_where_the_link_points(self):
+        # -o is a symbolic link inside <work>/tiles to a folder outside it: the build empties <work>/tiles (the
+        # link goes with it) and writes to the folder the link pointed at, which is what the folder check looked at
+        with tempfile.TemporaryDirectory(prefix="s57meshlink-") as tmp:
+            real = Path(tmp) / "real-out"
+            real.mkdir()
+            (Path(tmp) / "w" / "tiles").mkdir(parents=True)
+            link = Path(tmp) / "w" / "tiles" / "out"
+            link.symlink_to(real, target_is_directory=True)
+            p = subprocess.run(
+                [sys.executable, str(h.ROOT / "build-mesh.py"), self.own, "--name", "LINK", "--work", str(Path(tmp) / "w"),
+                 "-o", str(link), "-j", "2"], cwd=h.ROOT, capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stdout[-2000:] + p.stderr[-2000:])
+            self.assertTrue((real / "LINK_mesh" / "index.json").exists())
+            self.assertTrue((real / "LINK_mesh.json").exists())
+
     def test_the_cells_may_not_be_in_a_folder_the_build_removes(self):
         with tempfile.TemporaryDirectory(prefix="s57meshin-") as tmp:
             for where, args in ((Path(tmp) / "w" / "tiles" / "geojson", ["--work", str(Path(tmp) / "w"), "-o", str(Path(tmp) / "o")]),

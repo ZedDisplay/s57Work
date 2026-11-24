@@ -190,5 +190,57 @@ class ACellThatDoesNotExport(unittest.TestCase):
         self.assertEqual(log.read_text(), "", "the log no longer names a cell that is not in the inventory")
 
 
+@unittest.skipUnless(h.HAVE_GDAL, "needs ogr2ogr/ogrinfo")
+class ACellThatFailsToExportAgain(unittest.TestCase):
+    """Every cell exports; then one cell's file is replaced by something GDAL cannot read. Its export of the
+    first run, with its completion marker, is still on disk. The second run must not take that marker for the
+    cell being complete."""
+
+    def test_the_old_marker_does_not_stand(self):
+        import zipfile
+        work = Path(tempfile.mkdtemp(prefix="s57reexport-"))
+        try:
+            with zipfile.ZipFile(h.FIXTURE_ZIP) as z:
+                z.extractall(work / "src")
+            args = (str(work / "src"), "--by-band", "--no-replacements", "--cells-only", "-j", "2")
+            first = h.run_pipeline(work, *args)
+            self.assertEqual(first.returncode, 0, first.stdout[-2000:] + first.stderr[-2000:])
+            cell = h.FIXTURE_BAND5[0]
+            marker = work / "data" / "geojson" / "band5" / f".{cell}.exported"
+            self.assertTrue(marker.exists())
+            staged = list((work / "data" / "enc" / "all").glob(f"*/ENC_ROOT/{cell}/{cell}.000"))
+            self.assertEqual(len(staged), 1)
+            staged[0].write_text("this is no longer an S-57 cell\n")
+            second = h.run_pipeline(work, *args)
+            self.assertEqual(second.returncode, 1, second.stdout[-2000:] + second.stderr[-2000:])
+            self.assertIn(f"did not export completely: {cell}", second.stderr)
+            self.assertFalse(marker.exists(), "the marker of the earlier export is gone")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+class AbsentBand(unittest.TestCase):
+    """A band with no cell left in the inventory: its exports are orphans, as a cell's are when it leaves a band
+    that still exists. Needs nothing but the chart tool itself."""
+
+    def test_exports_of_a_band_that_left_the_inventory_are_removed(self):
+        p = h.pipeline()
+        with tempfile.TemporaryDirectory(prefix="s57absent-") as tmp:
+            base = Path(tmp) / "geojson"
+            for band, files in (("band4", ["DEPARE.geojson", ".US4XX1AA.exported"]),
+                                ("band5", ["DEPARE_US5XX1AA.geojson", "SOUNDG_US5XX1AB.geojson", ".US5XX1AA.exported",
+                                           ".US5XX1AB.exported"]),
+                                ("band2.resolved", ["DEPARE_US2EC03M.geojson"])):
+                (base / band).mkdir(parents=True)
+                for f in files:
+                    (base / band / f).write_text("{}")
+            (base / "band5" / p.EXPORT_ERROR_LOG).write_text("US5XX1AC: ogrinfo failed\n")
+            p._remove_absent_band_exports(base, {4})
+            self.assertEqual(sorted(f.name for f in (base / "band4").iterdir()), [".US4XX1AA.exported", "DEPARE.geojson"])
+            self.assertEqual([f.name for f in (base / "band5").iterdir()], [p.EXPORT_ERROR_LOG])
+            self.assertEqual((base / "band5" / p.EXPORT_ERROR_LOG).read_text(), "")
+            self.assertTrue((base / "band2.resolved" / "DEPARE_US2EC03M.geojson").exists(), "only bandN folders")
+
+
 if __name__ == "__main__":
     unittest.main()

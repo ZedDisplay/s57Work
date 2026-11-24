@@ -807,6 +807,28 @@ def _remove_orphan_cells(geojson_dir: Path, wanted_cells: set):
             m.unlink()
 
 
+def _remove_absent_band_exports(geojson_base: Path, present_bands: set):
+    """The same rule for a whole band: when a band has no cell left in the
+    inventory, every export in its data/geojson/bandN folder is an orphan
+    (its cells' layer files, named with the cell or, for a one-cell band,
+    without; their completion markers; the band's export error log).
+    Nothing in the tile build reads a band that is not in the inventory,
+    but build-mesh.py reads every bandN folder it is given."""
+    for band_dir in sorted(geojson_base.glob("band[1-6]")):
+        if not band_dir.is_dir() or int(band_dir.name[4:]) in present_bands:
+            continue
+        removed = 0
+        for f in list(band_dir.glob("*.geojson")) + list(band_dir.glob(".*.exported")):
+            f.unlink()
+            removed += 1
+        log = band_dir / EXPORT_ERROR_LOG
+        if log.exists() and log.stat().st_size:
+            log.write_text("")
+        if removed:
+            print(f"Band {band_dir.name[4:]} has no cell in the inventory: "
+                  f"removed {removed} stale export file(s) from {band_dir}")
+
+
 # ---------------------------------------------------------------------------
 # Stage 1b: replacement cells from NOAA's product catalog
 # ---------------------------------------------------------------------------
@@ -1142,6 +1164,12 @@ def _export_native(enc_dir, geojson_dir, cells_to_process, multi_file,
         """Export one cell: list its layers, drop its old outputs, run
         ogr2ogr per layer, mark the cell complete if nothing failed."""
         name = enc.stem
+        # The cell is being exported again, so the marker of its previous
+        # export no longer stands: it goes before anything can fail. Left
+        # in place, a re-export that failed right here (the layers could
+        # not be listed) kept the old marker beside the old files, and a
+        # check for "has a marker" took the cell as complete.
+        _cell_marker(geojson_dir, name).unlink(missing_ok=True)
         result = subprocess.run(
             ["ogrinfo", "-so", str(enc)], capture_output=True, text=True)
         if result.returncode != 0:
@@ -1165,7 +1193,6 @@ def _export_native(enc_dir, geojson_dir, cells_to_process, multi_file,
         pattern = f"*_{name}.geojson" if multi_file else "*.geojson"
         for old in geojson_dir.glob(pattern):
             old.unlink()
-        _cell_marker(geojson_dir, name).unlink(missing_ok=True)
 
         failed = 0
         for layer in layers:
@@ -2880,6 +2907,8 @@ def process_by_band(
         print(f"Bundle scale (finest cell compilation scale): 1:{cscl:,}")
 
     by_band = group_by_band(all_enc)
+    # Exports of a band that has left the inventory must not linger.
+    _remove_absent_band_exports(data_dir / "geojson", set(by_band))
 
     # Warn about non-NOAA files
     if 0 in by_band:

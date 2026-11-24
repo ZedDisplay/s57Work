@@ -147,9 +147,10 @@ def main(argv=None):
                 chart_meta = json.load(f)
         except (OSError, ValueError) as ex:
             ap.error(f"--chart-json {a.chart_json}: {ex}")
-    # Absolute: the second stage runs in its own interpreter from the repository folder.
-    work = os.path.abspath(a.work or os.path.join("data", "mesh", a.name))
-    out = os.path.abspath(a.out)
+    # Absolute, because the second stage runs in its own interpreter from the repository folder; and resolved
+    # (symbolic links followed) once, here, so that the folders checked below are the folders written to.
+    work = os.path.realpath(a.work or os.path.join("data", "mesh", a.name))
+    out = os.path.realpath(a.out)
     def inside(path, folder):
         """Is `path` the folder itself or something under it (by real path)?"""
         path, folder = os.path.realpath(path), os.path.realpath(folder)
