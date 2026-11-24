@@ -195,6 +195,7 @@ In practice the freshness checks make this mode rarely necessary: re-running the
 | `-j, --jobs` | Parallel workers for GDAL export, consolidation, and bands | half the CPU count |
 | `--catalog XML` | By-band: use this NOAA ENC product catalog instead of downloading `ENCProdCat_19115.xml` into `data/` (refreshed daily) | download |
 | `--no-replacements` | By-band: do not fetch the reschemed cells that replace cancelled cells from NOAA's catalog | fetch |
+| `--cells-only` | By-band: stop after the GDAL export. `data/geojson/bandN/` then holds every live cell of every band (band 6 included, since nothing is rendered) and `data/cancelled-cells.json` the cells left out; no tiles are built and tippecanoe is not needed. This is the input of `build-mesh.py` (docs/MESH.md) | off |
 | `--pmtiles` | Also write `<name>.pmtiles` beside the final `.mbtiles` (and into `--output-dir`): the same tiles, layers and metadata as a single-file PMTiles archive. Needs go-pmtiles' `pmtiles` on PATH | off |
 
 ---
