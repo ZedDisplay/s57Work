@@ -15,11 +15,13 @@ What it does, per 0.25-degree tile of the fixed world lattice:
      triangles themselves for the final check.
 Nothing is dropped silently: a part or hole that cannot hold a point stops the build with its position.
 
-The tiles built are those the PRIMARY root's cells reach (the bounding box of each cell's skin-of-the-earth
-areas); in those tiles every root's cells are read, so the mesh holds all charted water of those tiles (the most
-detailed chart wins, whichever district it is filed under).
+The cells are those named by each root's cells.json, the list s57-to-mbtiles.py --by-band --cells-only writes
+into its hand-over folder; nothing else in a root is read. The tiles built are those the PRIMARY root's cells
+reach (the bounding box of each cell's skin-of-the-earth areas); in those tiles every root's cells are read, so
+the mesh holds all charted water of those tiles (the most detailed chart wins, whichever district it is filed
+under).
 """
-import functools, glob, json, math, os, re, resource, subprocess, sys, time
+import functools, json, math, os, resource, subprocess, sys, time
 from fractions import Fraction as Fr
 import numpy as np, shapely
 from shapely.geometry import shape
@@ -55,7 +57,6 @@ def shortest_run(columns):
     return west, N_COLS - best_gap
 BANDS = ["band6", "band5", "band4", "band3", "band2", "band1"]
 RESCHEMED = {"band1": {"GLB"}, "band2": {"ARC", "ANT", "ATL", "GRL", "GOM", "PAC"}}     # s57-to-mbtiles.py RESCHEMED_REGION_CODES
-CELL_RE = re.compile(r"^US\d[A-Z0-9]{5}$")
 
 SKIN = {"DEPARE", "DRGARE", "UNSARE", "LNDARE", "FLODOC", "HULKES", "PONTON"}
 LAND = {"LNDARE"}
@@ -111,8 +112,7 @@ def units(g, dx=0):
 
 @functools.lru_cache(maxsize=900)
 def layer_file(path):
-    if not os.path.exists(path):
-        return []
+    """The features of one listed layer file: [(shape, properties) or None]."""
     out = []
     with open(path) as fh:
         features = json.load(fh)["features"]
@@ -127,52 +127,51 @@ def layer_file(path):
     return out
 
 
-def band_cells(root, band):
-    """{cell name: file suffix} of one band folder as s57-to-mbtiles.py exports it: LAYER_CELL.geojson, or plain
-    LAYER.geojson when the band holds a single cell (suffix ""). A cell counts when it has the chart build's
-    completion marker (.CELL.exported, written after the cell's last layer). Layer files of a cell without a
-    marker (an export that did not finish), and unsuffixed files that cannot be given to exactly one cell,
-    stop the build: a cell read in part would be a hole nothing later can see."""
-    d = f"{root}/{band}"
-    # The chart build's own record of what failed in its last export of this band (one line per failure: a cell
-    # whose layers could not be listed leaves no file and no marker, and only this log says it is missing).
-    errors = f"{d}/.export-errors.log"
-    if os.path.exists(errors):
-        with open(errors) as fh:
-            lines = [ln.strip() for ln in fh if ln.strip()]
-        if lines:
-            raise RuntimeError(f"{d}: the chart export recorded {len(lines)} failure(s) (.export-errors.log); "
-                               f"the first: {lines[0][:200]}")
-    marked = {os.path.basename(f)[1:-len(".exported")].upper() for f in glob.glob(f"{d}/.*.exported")}
-    marked = {nm for nm in marked if CELL_RE.match(nm)}
-    suffixed, bare = {}, []                  # CELL NAME -> the cell's name as its files spell it
-    for f in glob.glob(f"{d}/*.geojson"):
-        as_written = os.path.basename(f)[:-8].rpartition("_")[2]
-        if CELL_RE.match(as_written.upper()):
-            if suffixed.setdefault(as_written.upper(), as_written) != as_written:
-                raise RuntimeError(f"{d}: cell {as_written.upper()} has layer files under two spellings of its name")
-        else:
-            bare.append(os.path.basename(f))
-    if bare:
-        if suffixed or len(marked) != 1:
-            raise RuntimeError(f"{d}: layer files without a cell name ({sorted(bare)[0]}, ...) are a one-cell export, but the "
-                               f"folder has {len(marked)} completion markers and {len(suffixed)} cells with named files")
-        return {next(iter(marked)): ""}
-    unmarked = set(suffixed) - marked
-    if unmarked:
-        raise RuntimeError(f"{d}: {len(unmarked)} cells have layer files but no completion marker "
-                           f"(.CELL.exported): their export did not finish; the first: {sorted(unmarked)[0]}")
-    # The name is the cell's identity (upper case, as the cancelled list has it); the files are read as spelled.
-    return {nm: f"_{as_written}" for nm, as_written in suffixed.items()}
+CELLS_LIST = "cells.json"             # the hand-over list s57-to-mbtiles.py --by-band --cells-only writes last
+CELL_INDEX = "cell-index.json"        # the tile stage's own index of the cells it reads, in the work folder
+CELLS_LIST_VERSION = 1
+
+
+def listed_cells(root):
+    """[(band, name, {layer: file path})] of one hand-over folder, from its list and from nothing else: the list
+    is written only when every cell of the export finished, into a folder that was empty before the export, and
+    it names every cell with its files. What is not on the list is not read; a folder without a list, or a list
+    naming a file that is not there, stops the build."""
+    path = os.path.join(root, CELLS_LIST)
+    if not os.path.exists(path):
+        raise RuntimeError(f"{root}: no {CELLS_LIST}. A cells folder is what s57-to-mbtiles.py --by-band --cells-only "
+                           f"writes (data/cells); the list is written last, so without it the export did not finish")
+    with open(path) as fh:
+        doc = json.load(fh)
+    if doc.get("version") != CELLS_LIST_VERSION:
+        raise RuntimeError(f"{path}: list version {doc.get('version')!r}, this build reads version {CELLS_LIST_VERSION}")
+    out, seen = [], set()
+    for c in doc["cells"]:
+        name, band = c["cell"], f"band{c['band']}"
+        if band not in BANDS:
+            raise RuntimeError(f"{path}: cell {name} is of band {c['band']!r}, which is not a chart band")
+        if name in seen:
+            raise RuntimeError(f"{path}: cell {name} is listed twice")
+        seen.add(name)
+        files = {}
+        for layer, rel in c["files"].items():
+            full = os.path.normpath(os.path.join(root, rel))
+            if os.path.isabs(rel) or os.path.commonpath([full, root]) != root:
+                raise RuntimeError(f"{path}: cell {name} lists {rel!r}, which is not inside the folder")
+            if not os.path.isfile(full):
+                raise RuntimeError(f"{path}: cell {name} lists {rel}, which is not there")
+            files[layer] = full
+        out.append((band, name, files))
+    return out
 
 
 def cell_bbox(item):
     """Bounding box (degrees) of a cell's skin-of-the-earth areas, or None when it has none."""
-    root, band, name, suffix = item
+    root, band, name, files = item
     b = None
     for L in sorted(SKIN):
-        p = f"{root}/{band}/{L}{suffix}.geojson"
-        if not os.path.exists(p):
+        p = files.get(L)
+        if p is None:
             continue
         with open(p) as fh:
             features = json.load(fh)["features"]
@@ -181,44 +180,40 @@ def cell_bbox(item):
             if g and g["type"] in ("Polygon", "MultiPolygon"):
                 x0, y0, x1, y1 = shape(g).bounds
                 b = [x0, y0, x1, y1] if b is None else [min(b[0], x0), min(b[1], y0), max(b[2], x1), max(b[3], y1)]
-    return root, band, name, suffix, b
+    return root, band, name, files, b
 
 
 def cell_index(roots, work, workers):
-    """Every live cell of every root: [(rank, band, name, root, bbox, primary, file suffix)], most detailed
-    first. A cell is live unless <root>/../cancelled-cells.json lists it (the chart build's record of DSID
-    edition 0). The file suffix is band_cells': a cell's layer L is <root>/<band>/<L><suffix>.geojson."""
-    cache = f"{work}/cells.json"
+    """Every cell the roots' lists name: [(rank, band, name, root, bbox, primary, {layer: file})], most detailed
+    first; a cell with no skin-of-the-earth area is not a chart that speaks and is left out. A cell named by two
+    roots is read from the first."""
+    cache = f"{work}/{CELL_INDEX}"
     if os.path.exists(cache):
         with open(cache) as fh:
             return [tuple(c) for c in json.load(fh)]
     from multiprocessing import get_context
     items = []
-    for ri, root in enumerate(roots):
-        cancelled = set()
-        cj = os.path.join(os.path.dirname(root.rstrip("/")), "cancelled-cells.json")
-        if os.path.exists(cj):
-            with open(cj) as fh:
-                cancelled = {c["cell"].upper() for c in json.load(fh).get("cancelled", [])}
+    for root in roots:
+        listed = listed_cells(root)
         for band in BANDS:
-            items += [(root, band, nm, sfx) for nm, sfx in sorted(band_cells(root, band).items()) if nm not in cancelled]
+            items += [(root, b_, nm, files) for b_, nm, files in sorted(listed, key=lambda c: c[1]) if b_ == band]
     seen, out = set(), []
     with get_context("fork").Pool(workers) as pool:
-        for root, band, name, suffix, b in pool.imap(cell_bbox, items, chunksize=8):
+        for root, band, name, files, b in pool.imap(cell_bbox, items, chunksize=8):
             if b is None or name in seen:          # a cell present in two roots is read from the first
                 continue
             if b[2] - b[0] > 180.0 or b[0] < -180.0 or b[2] > 180.0:
                 # NOAA ends its cells on the date line (checked in its catalogue, November 2026: no cell of any
                 # district has a polygon across it). A cell written across it, or with longitudes beyond 180,
                 # is not something this build reads correctly, so it stops rather than mesh it wrongly.
-                raise RuntimeError(f"cell {name} ({root}/{band}): its charted areas run from longitude {b[0]} to {b[2]}; "
+                raise RuntimeError(f"cell {name} ({root}, {band}): its charted areas run from longitude {b[0]} to {b[2]}; "
                                    f"a cell across the date line or beyond 180 degrees is not read")
             seen.add(name)
             sub = 0
             if band in RESCHEMED and name[3:6] not in RESCHEMED[band]:
                 sub = 1                              # legacy cell of band 1 or 2: loses to a new-scheme cell of its band
-            out.append((BANDS.index(band) * 2 + sub, band, name, root, b, root == roots[0], suffix))
-    out.sort()
+            out.append((BANDS.index(band) * 2 + sub, band, name, root, b, root == roots[0], files))
+    out.sort(key=lambda c: c[:3])
     with open(cache, "w") as fh:
         json.dump(out, fh)
     return out
@@ -331,10 +326,12 @@ def process_tile(ij):
         ring_gid = []                   # per ring: its number, the same in every tile (cell, layer, feature, ring)
         line_of_ring = {}               # ring index -> (rank, side bits, clearance, hazard depth)
         points = {}                     # (x, y) -> [(rank, corner bits, value)]
-        for ci, ((rank, band, name, root, bb, primary, suffix), dx) in enumerate(touch):
+        for ci, ((rank, band, name, root, bb, primary, files), dx) in enumerate(touch):
             cell_no = CELL_NO[name]
             for L in LAYERS:
-                for fi, item in enumerate(layer_file(f"{root}/{band}/{L}{suffix}.geojson")):
+                if L not in files:
+                    continue
+                for fi, item in enumerate(layer_file(files[L])):
                     if item is None:
                         continue
                     g, pr = item

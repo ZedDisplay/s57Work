@@ -25,7 +25,7 @@ BY-BAND (recommended for multi-state regions):
 SKIP GDAL (use existing GeoJSON):
   %(prog)s --geojson-dir ./data/geojson/band3/ --minzoom 11 --maxzoom 12
 
-CELLS ONLY (the input of build-mesh.py; by-band stages 1-2, no tiles):
+CELLS ONLY (the input of build-mesh.py: data/cells/ with cells.json; no tiles):
   %(prog)s 01CGD_ENCs.zip --by-band --cells-only
 
 ─────────────────────────────────────────────────────────────────────────────
@@ -353,12 +353,13 @@ Skip GDAL (use existing GeoJSON):
                         help="Do not fetch the reschemed cells that replace "
                              "cancelled ones from NOAA's catalog (by-band)")
     parser.add_argument("--cells-only", action="store_true",
-                        help="Stop after the GDAL export (by-band): "
-                             "data/geojson/bandN/ holds every live cell of "
-                             "every band, band 6 included, and "
-                             "data/cancelled-cells.json the cells left out. "
-                             "This is what build-mesh.py reads; tippecanoe "
-                             "is not needed")
+                        help="By-band: export every live cell of every "
+                             "band (band 6 included) into data/cells/, "
+                             "emptied first, and write data/cells/cells.json "
+                             "when all of them exported completely (exit 1 "
+                             "and no list otherwise). That folder is what "
+                             "build-mesh.py reads. No tiles are built and "
+                             "tippecanoe is not needed")
     parser.add_argument("--pmtiles", action="store_true",
                         help="Also write a PMTiles archive of the final "
                              "tileset beside it (same tiles, layers and "
@@ -797,7 +798,15 @@ def drop_cancelled_cells(enc_files: List[Path], data_dir: Path,
 def _remove_orphan_cells(geojson_dir: Path, wanted_cells: set):
     """Delete per-cell exports of cells no longer in the inventory (cancelled
     since the last run, or gone from NOAA's zip) so they cannot reach
-    consolidation."""
+    consolidation.
+
+    A layer file is named for its cell (LAYER_CELL.geojson) except in a
+    folder that holds a single cell, where it is plain LAYER.geojson. So a
+    plain file in a folder whose inventory is not exactly one cell belongs
+    to no cell of that inventory: it was written when the folder held one
+    cell, and that cell is exported again under its own name now that
+    there are several. Left in place it was merged into the layer a second
+    time (consolidation takes every *.geojson of the folder)."""
     for f in geojson_dir.glob("*_US*.geojson"):
         cell = cell_name_from_stem(f.stem)
         if cell and cell not in wanted_cells:
@@ -805,28 +814,10 @@ def _remove_orphan_cells(geojson_dir: Path, wanted_cells: set):
     for m in geojson_dir.glob(".US*.exported"):
         if m.name[1:-9].upper() not in wanted_cells:
             m.unlink()
-
-
-def _remove_absent_band_exports(geojson_base: Path, present_bands: set):
-    """The same rule for a whole band: when a band has no cell left in the
-    inventory, every export in its data/geojson/bandN folder is an orphan
-    (its cells' layer files, named with the cell or, for a one-cell band,
-    without; their completion markers; the band's export error log).
-    Nothing in the tile build reads a band that is not in the inventory,
-    but build-mesh.py reads every bandN folder it is given."""
-    for band_dir in sorted(geojson_base.glob("band[1-6]")):
-        if not band_dir.is_dir() or int(band_dir.name[4:]) in present_bands:
-            continue
-        removed = 0
-        for f in list(band_dir.glob("*.geojson")) + list(band_dir.glob(".*.exported")):
-            f.unlink()
-            removed += 1
-        log = band_dir / EXPORT_ERROR_LOG
-        if log.exists() and log.stat().st_size:
-            log.write_text("")
-        if removed:
-            print(f"Band {band_dir.name[4:]} has no cell in the inventory: "
-                  f"removed {removed} stale export file(s) from {band_dir}")
+    if len(wanted_cells) != 1:
+        for f in geojson_dir.glob("*.geojson"):
+            if cell_name_from_stem(f.stem) is None:
+                f.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -1067,14 +1058,17 @@ def export_to_geojson(
     runtime: Optional[str] = None,
     max_workers: int = 1,
     data_dir: Optional[Path] = None,
+    always_named: bool = False,
 ) -> List[Path]:
     """Stage 2: export every layer of every cell in enc_files to GeoJSON
     in geojson_dir, natively or in the GDAL container. Cells whose
     completion marker holds their current EDTN.UPDN are skipped. Returns
     the non-empty GeoJSON files present afterwards; per-layer failures
-    are logged to EXPORT_ERROR_LOG and summarised on stderr."""
+    are logged to EXPORT_ERROR_LOG and summarised on stderr. With
+    always_named every file is LAYER_CELL.geojson, also for a single
+    cell (the hand-over to build-mesh.py has one naming form)."""
     tag = f"[{label}] " if label else ""
-    multi_file = len(enc_files) > 1
+    multi_file = always_named or len(enc_files) > 1
     data_dir = data_dir or DATA_DIR
     gdal = GdalRunner(native_gdal, runtime, data_dir)
 
@@ -1089,13 +1083,6 @@ def export_to_geojson(
     ]
 
     if not cells_to_process:
-        # Every current cell is complete (its marker holds its version).
-        # A failure logged by an earlier run is then about a cell that has
-        # since left the inventory: it no longer describes this export, and
-        # build-mesh.py refuses a band whose log records a failure.
-        stale_log = geojson_dir / EXPORT_ERROR_LOG
-        if stale_log.exists() and stale_log.stat().st_size:
-            stale_log.write_text("")
         existing = [f for f in geojson_dir.glob("*.geojson")
                     if f.stat().st_size > 100]
         print(f"{tag}GeoJSON fresh ({len(existing)} layers), skipping GDAL")
@@ -2745,6 +2732,107 @@ def resolve_same_band_overlaps(band: int, label: str,
 # Band pipeline (stages 2-3 for one band)
 # ---------------------------------------------------------------------------
 
+def stage_band_cells(enc_files: List[Path], band_enc_dir: Path) -> List[Path]:
+    """Copy each cell's .000 base AND any .001..NNN ER update files into
+    the band's folder and return the copies' .000 paths. Without the update
+    files, ogr2ogr applies only the base: incremental NOAA chart updates
+    would be silently dropped."""
+    band_enc_dir.mkdir(parents=True, exist_ok=True)
+    band_cells: List[Path] = []
+    for enc_file in enc_files:
+        cell_stem = enc_file.stem
+        for src in enc_file.parent.glob(f"{cell_stem}.*"):
+            dest = band_enc_dir / src.name
+            if (not dest.exists()
+                    or src.stat().st_mtime > dest.stat().st_mtime):
+                shutil.copy2(src, dest)
+        band_cells.append(band_enc_dir / enc_file.name)
+    return band_cells
+
+
+CELLS_LIST = "cells.json"
+CELLS_LIST_VERSION = 1
+
+
+def export_cells(
+    by_band: Dict[int, List[Path]],
+    data_dir: Path,
+    inputs: List[Path],
+    native_gdal: bool,
+    runtime: Optional[str],
+    max_workers: int,
+) -> Path:
+    """--cells-only: the hand-over to build-mesh.py. Every live cell of
+    every band is exported into data/cells/, which is emptied first, and
+    data/cells/cells.json is written last, only when every cell exported
+    completely. Returns the list's path; exits 1, with no list, when a
+    cell did not finish.
+
+    The folder is never resumed and never shared with the tile build
+    (whose own exports stay in data/geojson with its resume markers): it
+    holds what this run exported and nothing else, so the list can say
+    exactly what is in it. A reader takes the list as the whole truth:
+    the cells it names, each with the files it names; no list, no cells.
+    Files are always LAYER_CELL.geojson here."""
+    cells_dir = data_dir / "cells"
+    if cells_dir.exists():
+        shutil.rmtree(cells_dir)
+    cells_dir.mkdir(parents=True)
+    print("\n-- Cells only: exporting every band to "
+          f"{cells_dir} ------------------")
+    listed = []
+    unfinished = []
+    for band in sorted(b for b in by_band if b in BAND_ZOOM):
+        label = f"band{band}-{BAND_ZOOM[band][2]}"
+        band_cells = stage_band_cells(by_band[band],
+                                      data_dir / "enc" / f"band{band}")
+        out_dir = cells_dir / f"band{band}"
+        out_dir.mkdir()
+        export_to_geojson(
+            data_dir / "enc" / f"band{band}", out_dir, band_cells,
+            label=label, native_gdal=native_gdal, runtime=runtime,
+            max_workers=max_workers, data_dir=data_dir, always_named=True)
+        for cell in sorted(band_cells, key=lambda c: c.stem.upper()):
+            marker = _cell_marker(out_dir, cell.stem)
+            if not marker.exists():
+                unfinished.append(f"{cell.stem} (band {band})")
+                continue
+            # The folder was empty before this run and every file is named
+            # for its cell: these are the files this export of the cell
+            # wrote (export_to_geojson has dropped the empty ones).
+            files = {layer_name_from_stem(f.stem): f"band{band}/{f.name}"
+                     for f in sorted(out_dir.glob(f"*_{cell.stem}.geojson"))}
+            listed.append({"cell": cell.stem.upper(), "band": band,
+                           "edition": marker.read_text().strip(),
+                           "files": files})
+    if unfinished:
+        print(f"ERROR: {len(unfinished)} cell(s) did not export completely: "
+              f"{', '.join(unfinished[:10])}"
+              f"{' ...' if len(unfinished) > 10 else ''}; see the "
+              f"{EXPORT_ERROR_LOG} files under {cells_dir}. No "
+              f"{CELLS_LIST} is written.", file=sys.stderr)
+        sys.exit(1)
+    # Only the list and the files it names stay: the export's own markers
+    # and (empty) error logs are not part of the hand-over.
+    for band_dir in cells_dir.iterdir():
+        for f in list(band_dir.glob(".*.exported")) + [band_dir / EXPORT_ERROR_LOG]:
+            f.unlink(missing_ok=True)
+    cancelled = []
+    record = data_dir / "cancelled-cells.json"
+    if record.exists():
+        cancelled = sorted(c["cell"].upper() for c in
+                           json.loads(record.read_text()).get("cancelled", []))
+    doc = {"version": CELLS_LIST_VERSION,
+           "written": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+           "inputs": [p.name for p in inputs],
+           "cells": listed,
+           "cancelled_cells_left_out": cancelled}
+    tmp = cells_dir / (CELLS_LIST + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=1))
+    os.replace(tmp, cells_dir / CELLS_LIST)
+    return cells_dir / CELLS_LIST
+
+
 def prepare_band(
     band: int,
     enc_files: List[Path],
@@ -2756,12 +2844,10 @@ def prepare_band(
     native_gdal: bool,
     runtime: Optional[str],
     max_workers: int,
-    cells_only: bool = False,
 ) -> Optional[RenderSource]:
     """Run stages 2-3 (GDAL export, consolidate) for a single band and
     return it as a render source; tiling happens in process_by_band once
-    every band's footprints are known. With cells_only the band stops
-    after the export and nothing is returned."""
+    every band's footprints are known."""
     label = f"band{band}-{desc}"
     print(f"\n-- Band {band}: {desc} ({scale})  z{effective_min}-{effective_max} --")
 
@@ -2773,21 +2859,8 @@ def prepare_band(
     band_geojson_dir = geojson_base / f"band{band}"
     band_merged_dir = merged_base / f"band{band}"
 
-    band_enc_dir.mkdir(parents=True, exist_ok=True)
     band_geojson_dir.mkdir(parents=True, exist_ok=True)
-
-    # Copy each cell's .000 base AND any .001..NNN ER update files.
-    # Without the update files, ogr2ogr applies only the base — incremental
-    # NOAA chart updates would be silently dropped.
-    band_cells: List[Path] = []
-    for enc_file in enc_files:
-        cell_stem = enc_file.stem
-        for src in enc_file.parent.glob(f"{cell_stem}.*"):
-            dest = band_enc_dir / src.name
-            if (not dest.exists()
-                    or src.stat().st_mtime > dest.stat().st_mtime):
-                shutil.copy2(src, dest)
-        band_cells.append(band_enc_dir / enc_file.name)
+    band_cells = stage_band_cells(enc_files, band_enc_dir)
 
     # Cells cancelled or removed since the last run must not linger.
     _remove_orphan_cells(band_geojson_dir, {c.stem.upper() for c in band_cells})
@@ -2797,22 +2870,6 @@ def prepare_band(
         band_enc_dir, band_geojson_dir, band_cells, label=label,
         native_gdal=native_gdal, runtime=runtime, max_workers=max_workers,
         data_dir=data_dir)
-    if cells_only:
-        # The cells are the product here, so every one must have finished:
-        # a cell without its completion marker (a layer failed, or its
-        # layers could not even be listed and it has no file at all) is a
-        # hole in whatever is built from them. The tile build carries on
-        # past such a cell and reports it; this mode stops.
-        unfinished = sorted(c.stem for c in band_cells
-                            if not _cell_marker(band_geojson_dir, c.stem).exists())
-        if unfinished:
-            print(f"ERROR: [{label}] {len(unfinished)} cell(s) did not export "
-                  f"completely: {', '.join(unfinished[:10])}"
-                  f"{' ...' if len(unfinished) > 10 else ''}; see "
-                  f"{band_geojson_dir / EXPORT_ERROR_LOG}", file=sys.stderr)
-            sys.exit(1)
-        return None
-
     # Stage 2b: clip legacy cells under reschemed cells of the same band
     # (see the Stage 2b section). Returns per-cell file overrides for
     # consolidation; empty when the band has no resolvable overlap.
@@ -2869,8 +2926,10 @@ def process_by_band(
     consolidate, erase finer coverage, tile each render run, clip bands
     1-2 to the district region. Returns the tilesets for tile-join and
     the bundle's scale (bundle_scale; None when unknown). With cells_only
-    it stops after the export of every band (band 6 included: no zoom
-    range applies when nothing is rendered) and returns no tilesets."""
+    the inventory (cancelled cells dropped, replacements fetched) is
+    exported by export_cells instead, every band of it (band 6 included:
+    no zoom range applies when nothing is rendered), and no tilesets are
+    returned."""
     print("\n-- By-band mode ---------------------------------------------------")
 
     # Stage 1: stage all inputs
@@ -2907,13 +2966,16 @@ def process_by_band(
         print(f"Bundle scale (finest cell compilation scale): 1:{cscl:,}")
 
     by_band = group_by_band(all_enc)
-    # Exports of a band that has left the inventory must not linger.
-    _remove_absent_band_exports(data_dir / "geojson", set(by_band))
 
     # Warn about non-NOAA files
     if 0 in by_band:
         print(f"WARNING: {len(by_band[0])} file(s) don't match NOAA naming, "
               f"will be skipped.", file=sys.stderr)
+
+    if cells_only:
+        export_cells(by_band, data_dir, inputs, native_gdal, runtime,
+                     max_workers)
+        return [], cscl
 
     # Print band inventory
     print("\nBand inventory:")
@@ -2951,7 +3013,7 @@ def process_by_band(
         # runner disk on Pacific districts (band 1 of 14CGD at z16 =
         # tiling the whole Pacific EEZ at harbour zoom).
         effective_min, effective_max = band_render_range(band, minzoom, maxzoom)
-        if effective_min > effective_max and not cells_only:
+        if effective_min > effective_max:
             continue
         band_tasks.append((band, by_band[band], effective_min, effective_max,
                            desc, scale))
@@ -2970,7 +3032,7 @@ def process_by_band(
         for band, files, emin, emax, desc, scale in band_tasks:
             _collect(prepare_band(
                 band, files, data_dir, emin, emax, desc, scale,
-                native_gdal, runtime, max_workers, cells_only))
+                native_gdal, runtime, max_workers))
     else:
         with ThreadPoolExecutor(max_workers=min(len(band_tasks),
                                                 max_workers)) as pool:
@@ -2978,8 +3040,7 @@ def process_by_band(
             for band, files, emin, emax, desc, scale in band_tasks:
                 f = pool.submit(prepare_band, band, files, data_dir,
                                 emin, emax, desc, scale,
-                                native_gdal, runtime, max_workers,
-                                cells_only)
+                                native_gdal, runtime, max_workers)
                 futures[f] = band
             for future in as_completed(futures):
                 exc = future.exception()
@@ -2988,9 +3049,6 @@ def process_by_band(
                           file=sys.stderr)
                     sys.exit(1)
                 _collect(future.result())
-
-    if cells_only:
-        return [], cscl
 
     if not sources:
         print("ERROR: No charts to render", file=sys.stderr)
@@ -3191,14 +3249,16 @@ def main():
             cells_only=args.cells_only)
 
         if args.cells_only:
-            geojson_dir = data_dir / "geojson"
+            cells_list = data_dir / "cells" / CELLS_LIST
+            listed = json.loads(cells_list.read_text())
             print("\nCells exported (no tiles built):")
-            for band_dir in sorted(geojson_dir.glob("band[1-6]")):
-                cells = [m for m in band_dir.glob(".*.exported")]
-                print(f"  {band_dir.name}: {len(cells)} cell(s)")
-            print(f"  Cells: {geojson_dir.resolve()}/")
+            for band in sorted({c["band"] for c in listed["cells"]}):
+                n = sum(1 for c in listed["cells"] if c["band"] == band)
+                print(f"  band{band}: {n} cell(s)")
             print(f"  Cancelled cells left out: "
-                  f"{(data_dir / 'cancelled-cells.json').resolve()}")
+                  f"{len(listed['cancelled_cells_left_out'])}")
+            print(f"  Hand-over folder for build-mesh.py: "
+                  f"{cells_list.parent.resolve()}/ (the list: {CELLS_LIST})")
             return
 
         if len(tile_files) == 1:

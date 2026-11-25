@@ -27,7 +27,7 @@ import unittest
 from pathlib import Path
 
 from tests import helpers as h
-from tests.test_mesh_build import area, point, write_layers
+from tests.test_mesh_build import area, point
 
 try:
     import numpy as np
@@ -41,11 +41,13 @@ C_HAZARD = 1
 
 
 def build(base, name, cells):
-    """Write the cells under base/own and run build-mesh.py on them; returns (process, mesh arrays)."""
+    """Write the cells as a hand-over folder under base/own and run build-mesh.py on it; returns (process, mesh
+    arrays)."""
+    own = h.CellsFolder(Path(base) / "own")
     for band, cell, layers in cells:
-        write_layers(Path(base) / "own", band, cell, layers)
+        own.add(band, cell, layers)
     proc = subprocess.run(
-        [sys.executable, str(h.ROOT / "build-mesh.py"), str(Path(base) / "own" / "geojson"), "--name", name,
+        [sys.executable, str(h.ROOT / "build-mesh.py"), own.write(), "--name", name,
          "-o", str(Path(base) / "out"), "--work", str(Path(base) / "work"), "-j", "2"],
         cwd=h.ROOT, capture_output=True, text=True)
     if proc.returncode != 0:

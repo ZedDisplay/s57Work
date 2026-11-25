@@ -1,14 +1,15 @@
 """End-to-end: build-mesh.py on the chart cells of the five-cell fixture
 district, exported by the chart tool itself (s57-to-mbtiles.py --by-band
---cells-only; its data/geojson is the mesh build's input). Needs GDAL,
-the packages in mesh/requirements.txt and a C++ compiler with CGAL;
-skips without.
+--cells-only; its hand-over folder data/cells, with cells.json, is the
+mesh build's input). Needs GDAL, the packages in mesh/requirements.txt
+and a C++ compiler with CGAL; skips without.
 
 What is pinned here:
   * exit status 0 and every check passed;
-  * the cells read: the band 4 cell and the three band 5 cells; the
-    cancelled cell, which the chart build lists in cancelled-cells.json,
-    is left out;
+  * the hand-over folder holds the list and the files it names and
+    nothing else; the chart tool's working folder data/geojson is not
+    made; the cells listed and read are the band 4 cell and the three
+    band 5 cells, the cancelled cell being left out and recorded;
   * the mesh's rectangle holds the band 4 cell; the tiles are WRPMESH2
     of exactly the documented length, index version 2;
   * inside a band 5 cell the depth is that cell's, taken here from its
@@ -57,8 +58,8 @@ class MeshPipeline(unittest.TestCase):
         zip_ = cls.work / "MINI_ENCs.zip"
         shutil.copy(h.FIXTURE_ZIP, zip_)
         chart = h.run_pipeline(cls.work, str(zip_), "--by-band", "--no-replacements", "--cells-only", "-j", "2")
-        cls.cells = cls.work / "data" / "geojson"
-        if chart.returncode != 0 or not cls.cells.is_dir():
+        cls.cells = cls.work / "data" / "cells"
+        if chart.returncode != 0 or not (cls.cells / "cells.json").exists():
             raise AssertionError("cell export failed:\n" + chart.stdout[-3000:] + chart.stderr[-3000:])
         cls.chart = chart
         cls.out = cls.work / "out"
@@ -82,6 +83,22 @@ class MeshPipeline(unittest.TestCase):
         self.assertIn("Cells exported (no tiles built)", self.chart.stdout)
         self.assertEqual(list((self.work / "data" / "tiles").glob("*.mbtiles")), [])
         self.assertFalse(any((self.work / "data" / "merged").glob("*/*.geojson")), "nothing is consolidated")
+        self.assertFalse(any((self.work / "data" / "geojson").glob("*/*")), "the tile build's working folder is not used")
+
+    def test_the_folder_holds_the_list_and_what_it_names_and_nothing_else(self):
+        listed = json.loads((self.cells / "cells.json").read_text())
+        self.assertEqual(listed["version"], 1)
+        self.assertEqual(listed["inputs"], ["MINI_ENCs.zip"])
+        self.assertEqual(listed["cancelled_cells_left_out"], [h.FIXTURE_CANCELLED])
+        self.assertEqual(sorted((c["cell"], c["band"]) for c in listed["cells"]),
+                         sorted([(h.FIXTURE_BAND4, 4)] + [(c, 5) for c in h.FIXTURE_BAND5]))
+        named = {f for c in listed["cells"] for f in c["files"].values()}
+        on_disk = {str(p.relative_to(self.cells)) for p in self.cells.rglob("*") if p.is_file()}
+        self.assertEqual(on_disk, named | {"cells.json"})
+        for c in listed["cells"]:
+            self.assertIn("DEPARE", c["files"])
+            for layer, f in c["files"].items():
+                self.assertEqual(f, f"band{c['band']}/{layer}_{c['cell']}.geojson", "one naming form, also for a one-cell band")
 
     def test_exit_status_and_checks(self):
         self.assertEqual(self.proc.returncode, 0, self.proc.stdout[-2000:])
@@ -92,9 +109,9 @@ class MeshPipeline(unittest.TestCase):
     def test_cells_read(self):
         own, = self.side["cells"]
         self.assertEqual(own["role"], "own")
-        self.assertEqual(own["cells_by_band"], {"band4": 1, "band5": 3})
+        self.assertEqual((own["cells_listed"], own["cells_by_band"]), (4, {"band4": 1, "band5": 3}))
         self.assertEqual(own["cancelled_cells_left_out"], [h.FIXTURE_CANCELLED])
-        idx = json.loads((self.meshwork / "cells.json").read_text())
+        idx = json.loads((self.meshwork / "cell-index.json").read_text())
         self.assertEqual(sorted(c[2] for c in idx), sorted((h.FIXTURE_BAND4,) + h.FIXTURE_BAND5))
 
     def test_rectangle_and_format(self):
@@ -119,8 +136,7 @@ class MeshPipeline(unittest.TestCase):
         lon, lat = BAND4_ONLY_POINT
         t = h.mesh_triangle_at(self.m, lon, lat)
         self.assertIsNotNone(t)
-        # the only cell of its band: the chart build names its files without the cell name
-        coarse = shallowest_depth_area(self.cells / "band4" / "DEPARE.geojson", lon, lat)
+        coarse = shallowest_depth_area(self.cells / "band4" / f"DEPARE_{h.FIXTURE_BAND4}.geojson", lon, lat)
         self.assertIsNotNone(coarse)
         self.assertEqual(float(self.m["depth"][t]), float(numpy.float32(coarse)))
 
@@ -141,9 +157,9 @@ class MeshPipeline(unittest.TestCase):
 
 @unittest.skipUnless(h.HAVE_GDAL, "needs ogr2ogr/ogrinfo")
 class ACellThatDoesNotExport(unittest.TestCase):
-    """The fixture's cells plus one cell file that is not S-57: GDAL cannot list its layers, so it leaves no
-    file and no completion marker. The cell export must not report success, and the mesh build must not build
-    from what is left."""
+    """The fixture's cells plus one cell file that is not S-57: GDAL cannot list its layers. The cell export must
+    exit 1 and write no list, and the mesh build must refuse the folder for having none. With the bad cell gone
+    the next export is whole again: the folder is made anew every time, so nothing of the failed run remains."""
 
     @classmethod
     def setUpClass(cls):
@@ -154,49 +170,51 @@ class ACellThatDoesNotExport(unittest.TestCase):
         bad = cls.work / "src" / "ENC_ROOT" / "US5ZZ9ZZ"
         bad.mkdir(parents=True)
         (bad / "US5ZZ9ZZ.000").write_text("this is not an S-57 cell\n")
-        cls.export = h.run_pipeline(cls.work, str(cls.work / "src"), "--by-band", "--no-replacements",
-                                    "--cells-only", "-j", "2")
+        cls.args = (str(cls.work / "src"), "--by-band", "--no-replacements", "--cells-only", "-j", "2")
+        cls.export = h.run_pipeline(cls.work, *cls.args)
+        cls.cells = cls.work / "data" / "cells"
 
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls.work, ignore_errors=True)
 
-    def test_cells_only_fails(self):
+    def test_cells_only_fails_and_writes_no_list(self):
         self.assertEqual(self.export.returncode, 1, self.export.stdout[-2000:] + self.export.stderr[-2000:])
-        self.assertIn("1 cell(s) did not export completely: US5ZZ9ZZ", self.export.stderr)
+        self.assertIn("1 cell(s) did not export completely: US5ZZ9ZZ (band 5)", self.export.stderr)
         self.assertNotIn("Cells exported (no tiles built)", self.export.stdout)
+        self.assertFalse((self.cells / "cells.json").exists())
+        self.assertIn("US5ZZ9ZZ", (self.cells / "band5" / ".export-errors.log").read_text(), "the reason stays readable")
 
     @unittest.skipUnless(HAVE_MESH_DEPS and h.HAVE_CGAL, "needs the mesh packages and a C++ compiler with CGAL")
     def test_the_mesh_build_refuses_the_folder(self):
         p = subprocess.run(
-            [sys.executable, str(h.ROOT / "build-mesh.py"), str(self.work / "data" / "geojson"), "--name", "BAD",
+            [sys.executable, str(h.ROOT / "build-mesh.py"), str(self.cells), "--name", "BAD",
              "-o", str(self.work / "out"), "--work", str(self.work / "meshwork"), "-j", "2"],
             cwd=h.ROOT, capture_output=True, text=True)
         self.assertEqual(p.returncode, 1, p.stdout[-2000:] + p.stderr[-2000:])
-        self.assertIn("the chart export recorded 1 failure(s)", p.stdout)
-        self.assertIn("US5ZZ9ZZ", p.stdout)
+        self.assertIn("no cells.json", p.stdout)
         self.assertFalse((self.work / "out" / "BAD_mesh.json").exists())
 
-    def test_when_the_cell_has_left_the_inventory_its_old_failure_no_longer_blocks(self):
+    def test_with_the_cell_gone_the_next_export_is_whole(self):
         # (runs after the two above: unittest takes a class's tests in name order)
-        log = self.work / "data" / "geojson" / "band5" / ".export-errors.log"
-        self.assertIn("US5ZZ9ZZ", log.read_text())
         shutil.rmtree(self.work / "src" / "ENC_ROOT" / "US5ZZ9ZZ")
         for staged in (self.work / "data" / "enc" / "all").glob("*/ENC_ROOT/US5ZZ9ZZ"):
             shutil.rmtree(staged)
-        again = h.run_pipeline(self.work, str(self.work / "src"), "--by-band", "--no-replacements", "--cells-only", "-j", "2")
+        again = h.run_pipeline(self.work, *self.args)
         self.assertEqual(again.returncode, 0, again.stdout[-2000:] + again.stderr[-2000:])
-        self.assertIn("GeoJSON fresh", again.stdout, "the three remaining cells were complete: nothing is exported again")
-        self.assertEqual(log.read_text(), "", "the log no longer names a cell that is not in the inventory")
+        listed = json.loads((self.cells / "cells.json").read_text())
+        self.assertEqual(sorted(c["cell"] for c in listed["cells"]), sorted((h.FIXTURE_BAND4,) + h.FIXTURE_BAND5))
+        self.assertEqual(sorted(p.name for p in (self.cells / "band5").iterdir() if p.name.startswith(".")), [],
+                         "no error log and no marker of the failed run or of this one")
 
 
 @unittest.skipUnless(h.HAVE_GDAL, "needs ogr2ogr/ogrinfo")
 class ACellThatFailsToExportAgain(unittest.TestCase):
-    """Every cell exports; then one cell's file is replaced by something GDAL cannot read. Its export of the
-    first run, with its completion marker, is still on disk. The second run must not take that marker for the
-    cell being complete."""
+    """Every cell exports and the list is written; then one cell's file is replaced by something GDAL cannot
+    read. The next export must exit 1 and leave no list: the list of the first run is not left standing over a
+    folder that no longer matches it."""
 
-    def test_the_old_marker_does_not_stand(self):
+    def test_the_earlier_list_does_not_stand(self):
         import zipfile
         work = Path(tempfile.mkdtemp(prefix="s57reexport-"))
         try:
@@ -205,41 +223,47 @@ class ACellThatFailsToExportAgain(unittest.TestCase):
             args = (str(work / "src"), "--by-band", "--no-replacements", "--cells-only", "-j", "2")
             first = h.run_pipeline(work, *args)
             self.assertEqual(first.returncode, 0, first.stdout[-2000:] + first.stderr[-2000:])
+            self.assertTrue((work / "data" / "cells" / "cells.json").exists())
             cell = h.FIXTURE_BAND5[0]
-            marker = work / "data" / "geojson" / "band5" / f".{cell}.exported"
-            self.assertTrue(marker.exists())
             staged = list((work / "data" / "enc" / "all").glob(f"*/ENC_ROOT/{cell}/{cell}.000"))
             self.assertEqual(len(staged), 1)
             staged[0].write_text("this is no longer an S-57 cell\n")
             second = h.run_pipeline(work, *args)
             self.assertEqual(second.returncode, 1, second.stdout[-2000:] + second.stderr[-2000:])
-            self.assertIn(f"did not export completely: {cell}", second.stderr)
-            self.assertFalse(marker.exists(), "the marker of the earlier export is gone")
+            self.assertIn(f"did not export completely: {cell} (band 5)", second.stderr)
+            self.assertFalse((work / "data" / "cells" / "cells.json").exists())
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
 
-class AbsentBand(unittest.TestCase):
-    """A band with no cell left in the inventory: its exports are orphans, as a cell's are when it leaves a band
-    that still exists. Needs nothing but the chart tool itself."""
+class OrphanFiles(unittest.TestCase):
+    """The chart tool's working folder: a layer file without a cell name belongs to the folder's one cell. When
+    the folder's inventory is not exactly one cell it belongs to none (it is from when the folder held one) and
+    goes with the other orphans; it used to stay and be merged into the layer a second time. Needs nothing but
+    the chart tool itself."""
 
-    def test_exports_of_a_band_that_left_the_inventory_are_removed(self):
+    def folder(self, tmp, names):
+        d = Path(tmp) / "band4"
+        d.mkdir()
+        for n in names:
+            (d / n).write_text("{}")
+        return d
+
+    def test_a_plain_file_goes_when_the_folder_holds_more_than_one_cell(self):
         p = h.pipeline()
-        with tempfile.TemporaryDirectory(prefix="s57absent-") as tmp:
-            base = Path(tmp) / "geojson"
-            for band, files in (("band4", ["DEPARE.geojson", ".US4XX1AA.exported"]),
-                                ("band5", ["DEPARE_US5XX1AA.geojson", "SOUNDG_US5XX1AB.geojson", ".US5XX1AA.exported",
-                                           ".US5XX1AB.exported"]),
-                                ("band2.resolved", ["DEPARE_US2EC03M.geojson"])):
-                (base / band).mkdir(parents=True)
-                for f in files:
-                    (base / band / f).write_text("{}")
-            (base / "band5" / p.EXPORT_ERROR_LOG).write_text("US5XX1AC: ogrinfo failed\n")
-            p._remove_absent_band_exports(base, {4})
-            self.assertEqual(sorted(f.name for f in (base / "band4").iterdir()), [".US4XX1AA.exported", "DEPARE.geojson"])
-            self.assertEqual([f.name for f in (base / "band5").iterdir()], [p.EXPORT_ERROR_LOG])
-            self.assertEqual((base / "band5" / p.EXPORT_ERROR_LOG).read_text(), "")
-            self.assertTrue((base / "band2.resolved" / "DEPARE_US2EC03M.geojson").exists(), "only bandN folders")
+        with tempfile.TemporaryDirectory(prefix="s57orphan-") as tmp:
+            d = self.folder(tmp, ["DEPARE.geojson", "M_COVR.geojson", ".US4XX1AA.exported", "DEPARE_US4XX1AB.geojson",
+                                  ".US4XX1AB.exported", "DEPARE_US4XX9ZZ.geojson", ".US4XX9ZZ.exported"])
+            p._remove_orphan_cells(d, {"US4XX1AA", "US4XX1AB"})
+            self.assertEqual(sorted(f.name for f in d.iterdir()),
+                             [".US4XX1AA.exported", ".US4XX1AB.exported", "DEPARE_US4XX1AB.geojson"])
+
+    def test_a_plain_file_stays_when_the_folder_holds_one_cell(self):
+        p = h.pipeline()
+        with tempfile.TemporaryDirectory(prefix="s57orphan-") as tmp:
+            d = self.folder(tmp, ["DEPARE.geojson", "M_COVR.geojson", ".US4XX1AA.exported"])
+            p._remove_orphan_cells(d, {"US4XX1AA"})
+            self.assertEqual(sorted(f.name for f in d.iterdir()), [".US4XX1AA.exported", "DEPARE.geojson", "M_COVR.geojson"])
 
 
 if __name__ == "__main__":

@@ -219,9 +219,11 @@ jobs:
 
   # ── Step 2: export each district's chart cells ──────────────────────
   # The mesh is built from the chart source cells (docs/MESH.md), not from
-  # the chart tiles: s57-to-mbtiles.py --cells-only downloads nothing new,
-  # it runs the chart build's own first stages (stage, drop cancelled
-  # cells, fetch replacement cells, GDAL export) on NOAA's district zip.
+  # the chart tiles: s57-to-mbtiles.py --cells-only runs the chart build's
+  # own first stages (stage, drop cancelled cells, fetch replacement cells)
+  # on NOAA's district zip and exports every cell into data/cells, with
+  # data/cells/cells.json, the list of them, written last and only when
+  # every cell exported completely (it exits 1 otherwise).
   cells:
     needs: prepare
     if: needs.prepare.outputs.publish != 'skip' && needs.prepare.outputs.cells != '[]'
@@ -258,12 +260,8 @@ jobs:
             inputs="$inputs downloads/$f"
           done
           python3 s57-to-mbtiles.py $inputs --by-band --cells-only -j 4
-          # A layer that failed to export leaves its cell without a
-          # completion marker, and build-mesh.py stops on such a cell.
-          cat data/geojson/*/.export-errors.log 2>/dev/null || true
-          extra=""
-          [ -f data/replacement-cells.json ] && extra="replacement-cells.json"
-          tar --zstd -cf "cells-$DISTRICT.tar.zst" -C data geojson cancelled-cells.json $extra
+          # The hand-over folder: the cells and their list, nothing else.
+          tar --zstd -cf "cells-$DISTRICT.tar.zst" -C data cells
           ls -lh "cells-$DISTRICT.tar.zst"
 
       - name: Upload the cells
@@ -355,10 +353,10 @@ jobs:
           # The district's own cells first, then every other district's.
           others=""
           for d in $EXPECTED; do
-            [ "$d" = "$DISTRICT" ] || others="$others cells/$d/geojson"
+            [ "$d" = "$DISTRICT" ] || others="$others cells/$d/cells"
           done
           set +e
-          python3 build-mesh.py "cells/$DISTRICT/geojson" $others \
+          python3 build-mesh.py "cells/$DISTRICT/cells" $others \
             --name "$DISTRICT" \
             --chart-json "chart/$STEM.json" \
             -o out -j "$WORKERS" --archive
@@ -376,7 +374,7 @@ jobs:
           print(f"- box {s['clusters'][0]['box']}")
           print(f"- water {t['water_km2']:,.0f} km2, of it without a depth {t['water_without_depth_km2']:,.1f} km2; sides on chart lines {t['sides_on_chart_lines']:,}; chart points as corners {t['chart_points_as_corners']:,}")
           for c in s["cells"]:
-              print(f"- cells ({c['role']}) {os.path.basename(os.path.dirname(c['folder']))}: {c['cells']} {c['cells_by_band']}, cancelled left out {len(c['cancelled_cells_left_out'])}")
+              print(f"- cells ({c['role']}) {os.path.basename(os.path.dirname(c['folder']))}: listed {c['cells_listed']} ({c['list_written']}), read {c['cells']} {c['cells_by_band']}, cancelled left out {len(c['cancelled_cells_left_out'])}")
           EOF
             else
               echo "- no sidecar: the build stopped (exit status $rc; 1 tile stage, 2 a check of the second stage); see the log"

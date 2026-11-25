@@ -2,11 +2,11 @@
 back from the mesh files. Needs the mesh packages and a C++ compiler
 with CGAL (the exact cutter); skips without.
 
-The cells (degrees; the tile edge at -71.5 runs through the water):
+The cells (degrees; the tile edge at -71.5 runs through the water), each folder a hand-over folder with its
+cells.json:
 
   own folder
-    US4XX1AA  band 4  (the only cell of its band: files without the cell name)
-                      depth area 10 m, -71.6..-71.4 x 41.05..41.20, with a
+    US4XX1AA  band 4  depth area 10 m, -71.6..-71.4 x 41.05..41.20, with a
                       hole that is land (-71.58..-71.56 x 41.10..41.12);
                       an obstruction area of 2.5 m; two overlapping
                       dredged areas of 7 m and 5 m; a shoreline
@@ -15,7 +15,7 @@ The cells (degrees; the tile edge at -71.5 runs through the water):
                       of 4 m and 25 m; and a rock inside the band 5 cell
     US5XX1AB  band 5  depth area 3 m, -71.52..-71.48 x 41.08..41.12
                       (across the tile edge)
-    US5XX9ZZ  band 5  cancelled (listed in cancelled-cells.json)
+    US5XX9ZZ  band 5  its file is in the folder and on no list
   another district's folder
     US5YY1AA  band 5  depth area 1.5 m inside the own band 4 water
     US5YY1AB  band 5  far away, in a tile the own cells do not reach
@@ -34,7 +34,7 @@ What is pinned:
     nowhere else; a chart point is a triangle corner at its own position,
     marked with what it is; a sounding is kept only where it is shallower
     than the depth area it lies in;
-  * the cancelled cell and the far cell are not in the mesh;
+  * a file that is in the folder and not on the list is not read, and the far cell is not in the mesh;
   * neighbour links are mutual and the multiplier is in range.
 """
 import json
@@ -96,20 +96,9 @@ def point(xy, props):
     return {"type": "Feature", "properties": props, "geometry": {"type": "Point", "coordinates": list(xy)}}
 
 
-def write_layers(root, band, cell, layers, only_cell_of_band=False):
-    """A cell as s57-to-mbtiles.py exports it: LAYER_CELL.geojson, or LAYER.geojson when it is the only cell of
-    its band, and the completion marker .CELL.exported."""
-    d = Path(root) / "geojson" / band
-    d.mkdir(parents=True, exist_ok=True)
-    for layer, features in layers.items():
-        name = layer if only_cell_of_band else f"{layer}_{cell}"
-        (d / f"{name}.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": features}))
-    (d / f".{cell}.exported").write_text("1.0\n")
-
-
 def write_cells(base):
-    own, other = Path(base) / "own", Path(base) / "other"
-    write_layers(own, "band4", "US4XX1AA", only_cell_of_band=True, layers={
+    own, other = h.CellsFolder(Path(base) / "own"), h.CellsFolder(Path(base) / "other")
+    own.add("band4", "US4XX1AA", {
         "DEPARE": [area(BOX, {"DRVAL1": 10.0, "DRVAL2": 20.0}, hole=ISLAND)],
         "LNDARE": [area(ISLAND, {})],
         "OBSTRN": [area(OBSTRUCTION, {"VALSOU": 2.5})],
@@ -122,12 +111,11 @@ def write_cells(base):
         "LIGHTS": [point(LIGHT, {})],
         "SOUNDG": [point(SOUNDING_SHALLOW, {"DEPTH": 4.0}), point(SOUNDING_DEEP, {"DEPTH": 25.0})],
     })
-    write_layers(own, "band5", "US5XX1AB", {"DEPARE": [area(FINE, {"DRVAL1": 3.0})]})
-    write_layers(own, "band5", "US5XX9ZZ", {"DEPARE": [area((-71.30, 41.05, -71.25, 41.10), {"DRVAL1": 0.5})]})
-    (own / "cancelled-cells.json").write_text(json.dumps({"cancelled": [{"cell": "US5XX9ZZ"}]}))
-    write_layers(other, "band5", "US5YY1AA", {"DEPARE": [area(OTHER_FINE, {"DRVAL1": 1.5})]})
-    write_layers(other, "band5", "US5YY1AB", {"DEPARE": [area((-70.05, 41.05, -70.0, 41.10), {"DRVAL1": 0.5})]})
-    return str(own / "geojson"), str(other / "geojson")
+    own.add("band5", "US5XX1AB", {"DEPARE": [area(FINE, {"DRVAL1": 3.0})]})
+    own.add("band5", "US5XX9ZZ", {"DEPARE": [area((-71.30, 41.05, -71.25, 41.10), {"DRVAL1": 0.5})]}, listed=False)
+    other.add("band5", "US5YY1AA", {"DEPARE": [area(OTHER_FINE, {"DRVAL1": 1.5})]})
+    other.add("band5", "US5YY1AB", {"DEPARE": [area((-70.05, 41.05, -70.0, 41.10), {"DRVAL1": 0.5})]})
+    return own.write(cancelled=["US5XX8ZZ"]), other.write()
 
 
 def centre(b):
@@ -198,7 +186,8 @@ class HandMadeCells(unittest.TestCase):
                                           "mesh_tiles": 2}])
         own, other = s["cells"]
         self.assertEqual((own["role"], own["cells"], own["cells_by_band"]), ("own", 2, {"band4": 1, "band5": 1}))
-        self.assertEqual(own["cancelled_cells_left_out"], ["US5XX9ZZ"])
+        self.assertEqual((own["cells_listed"], own["list_written"], own["inputs"]), (2, "2026-11-24T00:00:00Z", ["TEST_ENCs.zip"]))
+        self.assertEqual(own["cancelled_cells_left_out"], ["US5XX8ZZ"], "as the folder's list records them")
         self.assertEqual((other["role"], other["cells"]), ("other district", 2))
 
     def test_the_catalogue_takes_the_sidecar(self):
@@ -224,40 +213,58 @@ class HandMadeCells(unittest.TestCase):
             self.assertEqual(listing.returncode, 0, listing.stderr)
             self.assertIn("ARC_mesh/index.json", listing.stdout)
 
-    def test_the_output_may_not_be_the_folder_the_build_empties(self):
-        with tempfile.TemporaryDirectory(prefix="s57meshout-") as tmp:
-            p = subprocess.run(
-                [sys.executable, str(h.ROOT / "build-mesh.py"), self.own, "--name", "X", "--work", str(Path(tmp) / "w"),
-                 "-o", str(Path(tmp) / "w" / "tiles" / "out")], cwd=h.ROOT, capture_output=True, text=True)
-            self.assertEqual(p.returncode, 2, p.stdout[-500:] + p.stderr[-500:])
-            self.assertIn("tiles folder", p.stderr)
-
-    def test_an_output_given_through_a_link_is_written_where_the_link_points(self):
-        # -o is a symbolic link inside <work>/tiles to a folder outside it: the build empties <work>/tiles (the
-        # link goes with it) and writes to the folder the link pointed at, which is what the folder check looked at
-        with tempfile.TemporaryDirectory(prefix="s57meshlink-") as tmp:
-            real = Path(tmp) / "real-out"
-            real.mkdir()
-            (Path(tmp) / "w" / "tiles").mkdir(parents=True)
-            link = Path(tmp) / "w" / "tiles" / "out"
-            link.symlink_to(real, target_is_directory=True)
-            p = subprocess.run(
-                [sys.executable, str(h.ROOT / "build-mesh.py"), self.own, "--name", "LINK", "--work", str(Path(tmp) / "w"),
-                 "-o", str(link), "-j", "2"], cwd=h.ROOT, capture_output=True, text=True)
-            self.assertEqual(p.returncode, 0, p.stdout[-2000:] + p.stderr[-2000:])
-            self.assertTrue((real / "LINK_mesh" / "index.json").exists())
-            self.assertTrue((real / "LINK_mesh.json").exists())
-
-    def test_the_cells_may_not_be_in_a_folder_the_build_removes(self):
-        with tempfile.TemporaryDirectory(prefix="s57meshin-") as tmp:
-            for where, args in ((Path(tmp) / "w" / "tiles" / "geojson", ["--work", str(Path(tmp) / "w"), "-o", str(Path(tmp) / "o")]),
-                                (Path(tmp) / "o" / "X_mesh" / "geojson", ["--work", str(Path(tmp) / "w"), "-o", str(Path(tmp) / "o")])):
-                shutil.copytree(self.own, where)
-                p = subprocess.run([sys.executable, str(h.ROOT / "build-mesh.py"), str(where), "--name", "X", *args],
+    def test_no_folder_given_may_be_inside_a_folder_the_build_removes(self):
+        # the build removes <work>/tiles and <out>/<name>_mesh; every path is resolved first, so a link is judged
+        # by where it points
+        with tempfile.TemporaryDirectory(prefix="s57meshpaths-") as tmp:
+            tmp = Path(tmp)
+            w, o = tmp / "w", tmp / "o"
+            (w / "tiles").mkdir(parents=True)
+            (o / "X_mesh").mkdir(parents=True)
+            (tmp / "elsewhere").mkdir()
+            link_out = tmp / "link-into-tiles"
+            link_out.symlink_to(w / "tiles", target_is_directory=True)
+            cells_in_tiles = w / "tiles" / "cells"
+            shutil.copytree(self.own, cells_in_tiles)
+            cells_in_mesh = o / "X_mesh" / "cells"
+            shutil.copytree(self.own, cells_in_mesh)
+            link_cells = tmp / "link-to-cells-in-tiles"
+            link_cells.symlink_to(cells_in_tiles, target_is_directory=True)
+            refused = [
+                ("the output directory", [self.own, "--work", str(w), "-o", str(w / "tiles" / "out")]),
+                ("the output directory", [self.own, "--work", str(w), "-o", str(link_out)]),
+                ("the cells folder", [str(cells_in_tiles), "--work", str(w), "-o", str(o)]),
+                ("the cells folder", [str(cells_in_mesh), "--work", str(w), "-o", str(o)]),
+                ("the cells folder", [str(link_cells), "--work", str(w), "-o", str(o)]),
+                ("the work directory", [self.own, "--work", str(o / "X_mesh" / "w"), "-o", str(o)]),
+            ]
+            for what, args in refused:
+                p = subprocess.run([sys.executable, str(h.ROOT / "build-mesh.py"), *args, "--name", "X"],
                                    cwd=h.ROOT, capture_output=True, text=True)
-                self.assertEqual(p.returncode, 2, p.stdout[-500:] + p.stderr[-500:])
-                self.assertIn("which the build removes before reading the cells", p.stderr)
-                self.assertTrue((where / "band4" / "DEPARE.geojson").exists(), "the cells are untouched")
+                self.assertEqual(p.returncode, 2, f"{args}: " + p.stdout[-500:] + p.stderr[-500:])
+                self.assertIn(what, p.stderr, args)
+                self.assertIn("the build removes that folder", p.stderr, args)
+            for kept in (cells_in_tiles, cells_in_mesh):
+                self.assertTrue((kept / "cells.json").exists(), "nothing was removed")
+
+    def test_paths_given_through_links_are_used_where_they_point(self):
+        # the output and the cells are symbolic links that sit inside <work>/tiles and point outside it: the
+        # build empties <work>/tiles (the links go with it) and still reads the cells and writes the mesh
+        with tempfile.TemporaryDirectory(prefix="s57meshlink-") as tmp:
+            tmp = Path(tmp)
+            real_out = tmp / "real-out"
+            real_out.mkdir()
+            (tmp / "w" / "tiles").mkdir(parents=True)
+            link_out = tmp / "w" / "tiles" / "out"
+            link_out.symlink_to(real_out, target_is_directory=True)
+            link_cells = tmp / "w" / "tiles" / "cells"
+            link_cells.symlink_to(self.own, target_is_directory=True)
+            p = subprocess.run(
+                [sys.executable, str(h.ROOT / "build-mesh.py"), str(link_cells), "--name", "LINK", "--work", str(tmp / "w"),
+                 "-o", str(link_out), "-j", "2"], cwd=h.ROOT, capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, p.stdout[-2000:] + p.stderr[-2000:])
+            self.assertTrue((real_out / "LINK_mesh" / "index.json").exists())
+            self.assertTrue((real_out / "LINK_mesh.json").exists())
 
     # -- what is water -----------------------------------------------------
 
@@ -273,8 +280,9 @@ class HandMadeCells(unittest.TestCase):
         self.assertIsNone(h.mesh_triangle_at(self.m, *centre(ISLAND)), "land is not in the mesh")
         self.assertIsNone(h.mesh_triangle_at(self.m, *centre(PONTOON)), "a pontoon with no water area under it is not water")
 
-    def test_cancelled_and_far_cells_are_not_in_the_mesh(self):
-        self.assertIsNone(h.mesh_triangle_at(self.m, -71.275, 41.075))
+    def test_unlisted_and_far_cells_are_not_in_the_mesh(self):
+        self.assertTrue((Path(self.own) / "band5" / "DEPARE_US5XX9ZZ.geojson").exists(), "the file is in the folder")
+        self.assertIsNone(h.mesh_triangle_at(self.m, -71.275, 41.075), "and, being on no list, was not read")
         self.assertIsNone(h.mesh_triangle_at(self.m, -70.025, 41.075))
 
     # -- depths ------------------------------------------------------------
@@ -407,14 +415,14 @@ class ChartLineOnATileEdge(unittest.TestCase):
     def test_the_line_is_kept_and_the_build_passes(self):
         cable = ((-71.5, 41.06), (-71.5, 41.08))
         with tempfile.TemporaryDirectory(prefix="s57meshedge-") as tmp:
-            own = Path(tmp) / "own"
-            write_layers(own, "band5", "US5XX1AB", only_cell_of_band=True, layers={
+            own = h.CellsFolder(Path(tmp) / "own")
+            own.add("band5", "US5XX1AB", {
                 "DEPARE": [area((-71.6, 41.05, -71.5, 41.10), {"DRVAL1": 3.0})],
                 "CBLOHD": [line(cable, {"VERCLR": "9.5"})]})
-            write_layers(own, "band4", "US4XX1AA", only_cell_of_band=True, layers={
+            own.add("band4", "US4XX1AA", {
                 "DEPARE": [area((-71.5, 41.05, -71.4, 41.10), {"DRVAL1": 10.0})]})
             p = subprocess.run(
-                [sys.executable, str(h.ROOT / "build-mesh.py"), str(own / "geojson"), "--name", "EDGE",
+                [sys.executable, str(h.ROOT / "build-mesh.py"), own.write(), "--name", "EDGE",
                  "-o", str(Path(tmp) / "out"), "--work", str(Path(tmp) / "work"), "-j", "2"],
                 cwd=h.ROOT, capture_output=True, text=True)
             self.assertEqual(p.returncode, 0, p.stdout[-3000:] + p.stderr[-3000:])

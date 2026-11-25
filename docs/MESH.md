@@ -16,21 +16,27 @@ only `WRPMESH1` (index version 1) cannot open these meshes.**
 
 ## Input
 
-One or more folders of per-cell GeoJSON, as `s57-to-mbtiles.py` exports
-them in by-band mode (`data/geojson/`):
+One or more hand-over folders written by
+`s57-to-mbtiles.py --by-band --cells-only` (`data/cells`):
 
-- `bandN/LAYER_CELL.geojson` for every layer of every cell of band N, or
-  `bandN/LAYER.geojson` when the band holds a single cell;
-- `bandN/.CELL.exported`, the chart build's completion marker, written
-  after a cell's last layer. A cell with layer files and no marker (an
-  export that did not finish) stops the build;
-- `bandN/.export-errors.log`, the chart build's record of what failed in
-  its last export of the band. A cell whose layers could not be listed
-  leaves no file and no marker, and only this log says so: any line in
-  it stops the build. (`s57-to-mbtiles.py --cells-only` itself exits
-  non-zero when a cell did not finish.)
-- `cancelled-cells.json` beside the folder: the cells NOAA has withdrawn
-  (DSID edition 0). They are left out.
+- `bandN/LAYER_CELL.geojson` for every layer of every live cell of every
+  band (band 6 included), always named for its cell;
+- `cells.json`, the list: every cell with its band, its edition and its
+  files, the inputs it was exported from, and the cancelled cells that
+  were left out.
+
+The chart tool empties the folder before it exports and writes the list
+last, only when every cell exported completely; when a cell fails it
+exits 1 and there is no list. So the list exists only for a whole export
+and describes a folder that held nothing before it.
+
+The mesh build reads the list and the files it names, and nothing else:
+a file in the folder that is not on the list is never opened. A folder
+without a list, a list of a version this build does not read, a cell
+listed twice, a path that leaves the folder and a listed file that is
+not there each stop the build (`listed_cells` in `mesh/build.py`). The
+build does not read the chart tool's working folder (`data/geojson`),
+its completion markers or its error log.
 
 Coordinates are read in the source's own whole numbers, units of 1e-7
 degree, and stay in them until the mesh is written.
@@ -100,7 +106,7 @@ Under the work directory (`data/mesh/<name>/`, `--work`):
 | Stage | Module | Writes |
 |---|---|---|
 | cutter | `mesh/exact_cut.cpp` | `mesh/exact_cut`, compiled by the CLI when missing or older than its source |
-| tiles | `mesh/build.py` | `cells.json` (the cell index), `tiles/tile_I_J.npz` (the cut of each tile), `tiles.json` (per-tile results) |
+| tiles | `mesh/build.py` | `cell-index.json` (the cells read, from the lists), `tiles/tile_I_J.npz` (the cut of each tile), `tiles.json` (per-tile results) |
 | second stage | `mesh/finalize.py` | `<out>/<name>_mesh/mesh_III_JJJ.bin` + `index.json` |
 | CLI | `mesh/cli.py` | `<out>/<name>_mesh.json`, `<out>/<name>_mesh.tar.zst` (`--archive`) |
 
@@ -235,7 +241,8 @@ In the output directory (`-o`, default `data/tiles/`):
   triangle at a corner carries the corner's mark.
 - `<name>_mesh.json`, the sidecar: `name`, `format`, `build_date`,
   `build_seconds`, `builder_version`, `workers`, `cells` (per folder: its
-  role, live cells by band, cancelled cells left out),
+  role, when its list was written and from which inputs, the cells listed
+  and read by band, the cancelled cells its export left out),
   `chart_build_date` and `chart_metadata` (from `--chart-json`),
   `tile_stage` (tiles, water, land and uncharted area, water without a
   depth, sides on chart lines, chart points as corners), `clusters` (one
@@ -252,9 +259,13 @@ its water lies far apart (07CGD: Florida and Puerto Rico in one mesh).
 ```bash
 pip install -r mesh/requirements.txt     # numpy scipy shapely triangle
 # a C++17 compiler with CGAL, GMP and MPFR (Homebrew: cgal; Ubuntu: libcgal-dev libgmp-dev libmpfr-dev)
-./s57-to-mbtiles.py 01CGD_ENCs.zip --by-band --cells-only              # the cells, in data/geojson (no tiles)
-./build-mesh.py data/geojson /path/to/05CGD/geojson --name 01CGD -o data/tiles -j 7 --archive
+./s57-to-mbtiles.py 01CGD_ENCs.zip --by-band --cells-only              # the cells and their list, in data/cells (no tiles)
+./build-mesh.py data/cells /path/to/05CGD/cells --name 01CGD -o data/tiles -j 7 --archive
 ```
+
+Every path given is resolved once (symbolic links followed) and checked
+once: the build removes `<work>/tiles` and `<out>/<name>_mesh`, and no
+folder it is given may be one of those or lie inside one.
 
 Options: `--name` (required), `-o`, `--work`, `-j/--workers`,
 `--chart-json FILE` (the published chart's metadata; its `build_date`
@@ -265,16 +276,19 @@ becomes `chart_build_date`), `--archive`, `--keep-intermediate` (keep
 
 - `tests/test_mesh_clearance.py`: the clearance rule.
 - `tests/test_mesh_rules.py`: what a piece of water carries from the
-  shapes it lies in; the cell index (order, new scheme before legacy,
-  cancelled cells, a one-cell band, an unfinished export).
+  shapes it lies in; the cell index (the list is the only source; order,
+  new scheme before legacy; a folder with no list, a listed file that is
+  missing and a list that cannot be read are refused).
 - `tests/test_mesh_build.py`: `build-mesh.py` on hand-made cells, read
   back from the mesh files: only charted water, the most detailed chart
   wins across folders, lines as marked sides over their whole length,
   points as marked corners, soundings, the format, the sidecar. Needs
   the mesh packages and CGAL.
-- `tests/test_mesh_pipeline.py`: the chart build on the five-cell
-  fixture, then `build-mesh.py` on the cells it exported. Needs GDAL,
-  tippecanoe, the mesh packages and CGAL.
+- `tests/test_mesh_pipeline.py`: `--cells-only` on the five-cell fixture
+  (the folder holds the list and what it names and nothing else), then
+  `build-mesh.py` on it; a cell that fails to export leaves no list and
+  the mesh build refuses the folder. Needs GDAL, the mesh packages and
+  CGAL.
 - `tests/test_mesh_catalog.py`: the catalogue writer.
 
 ## CI: `.github/workflows/build-mesh.yml`
@@ -294,13 +308,13 @@ set; a test run always builds.
 - `cells`: one job per district of `mesh.active` (all of them, whichever
   meshes are built), on `ubuntu-latest`: download NOAA's district zip,
   `s57-to-mbtiles.py --by-band --cells-only` (the chart build's own first
-  stages: staging, cancelled cells, replacement cells, GDAL export of
-  every band; no tiles), and upload `data/geojson` with
-  `cancelled-cells.json` as the artifact `cells-<D>` (kept one day).
+  stages: staging, cancelled cells, replacement cells; then the export of
+  every band into `data/cells` with its list; no tiles), and upload
+  `data/cells` as the artifact `cells-<D>` (kept one day).
 - `build`: one job per mesh on the runner named by `mesh.runner`, after
   every `cells` job has succeeded: install CGAL, GMP, MPFR and the
   packages, unpack every district's cells, fetch the chart's record, run
-  `build-mesh.py cells/<D>/geojson <every other district's> --name <D>
+  `build-mesh.py cells/<D>/cells <every other district's> --name <D>
   --chart-json … --archive`, upload `<D>_mesh.tar.zst` and
   `<D>_mesh.json`. A failed check fails the job and nothing of that
   district is published. If any district's cells are missing the build

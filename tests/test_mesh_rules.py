@@ -12,14 +12,19 @@ state is inside: (layer, properties, rank, order). What is pinned:
     the depth alone;
   * land, structure, fairway, dredged, navigable, clearance, opening;
   * a state no chart speaks for is "no chart", nothing else;
-  * the cell index: most detailed band first, a new-scheme cell of band 1
-    or 2 before a legacy cell of its band, a cancelled cell left out, a
-    cell present in two folders read from the first.
+  * the cell index: the cells are those a folder's list (cells.json)
+    names, with the files it names, and nothing else in the folder; most
+    detailed band first, a new-scheme cell of band 1 or 2 before a legacy
+    cell of its band, a cell present in two folders read from the first;
+    a folder with no list, a listed file that is missing, and a list this
+    build cannot read are refused.
 """
 import json
 import tempfile
 import unittest
 from pathlib import Path
+
+from tests import helpers as h
 
 try:
     from mesh import build as B
@@ -100,40 +105,35 @@ class Rules(unittest.TestCase):
         self.assertEqual(r["nowater"], 0, "no chart is its own reason; 'no water area' is said of a chart that speaks")
 
 
-def write_cell(root, band, name, layer="DEPARE", box=(0.0, 0.0, 1.0, 1.0)):
-    """A cell with one skin-of-the-earth area, in the layout s57-to-mbtiles.py exports."""
+def square(box=(0.0, 0.0, 1.0, 1.0)):
     w, s, e, n = box
-    d = Path(root) / "geojson" / band
-    d.mkdir(parents=True, exist_ok=True)
-    (d / f"{layer}_{name}.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": [
-        {"type": "Feature", "properties": {"DRVAL1": 5.0},
-         "geometry": {"type": "Polygon", "coordinates": [[[w, s], [e, s], [e, n], [w, n], [w, s]]]}}]}))
-    (d / f".{name}.exported").write_text("1.0\n")
-    return str(Path(root) / "geojson")
+    return [{"type": "Feature", "properties": {"DRVAL1": 5.0},
+             "geometry": {"type": "Polygon", "coordinates": [[[w, s], [e, s], [e, n], [w, n], [w, s]]]}}]
 
 
 @unittest.skipUnless(HAVE, "mesh packages not installed")
 class CellIndex(unittest.TestCase):
+    """The cells come from each folder's list (cells.json) and from nothing else in the folder."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="s57cells-")
-        self.own = Path(self.tmp.name) / "own"
-        self.other = Path(self.tmp.name) / "other"
+        self.own = h.CellsFolder(Path(self.tmp.name) / "own")
+        self.other = h.CellsFolder(Path(self.tmp.name) / "other")
         self.work = Path(self.tmp.name) / "work"
         self.work.mkdir()
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_order_cancelled_and_first_folder(self):
-        a = write_cell(self.own, "band5", "US5XX1AA", box=(0.0, 0.0, 0.5, 0.5))
-        write_cell(self.own, "band4", "US4XX1AA")
-        write_cell(self.own, "band2", "US2EC03M")                  # legacy name
-        write_cell(self.own, "band2", "US2ATLPF")                  # new scheme (ATL)
-        write_cell(self.own, "band5", "US5XX9ZZ")                  # cancelled, still exported
-        write_cell(self.own, "band3", "US3XX1AA", layer="M_COVR")  # no skin-of-the-earth area: not a chart that speaks
-        (self.own / "cancelled-cells.json").write_text(json.dumps({"cancelled": [{"cell": "US5XX9ZZ"}]}))
-        b = write_cell(self.other, "band5", "US5YY1AA")
-        write_cell(self.other, "band4", "US4XX1AA", box=(5.0, 5.0, 6.0, 6.0))    # also in the first folder
+    def test_order_and_first_folder(self):
+        self.own.add("band5", "US5XX1AA", {"DEPARE": square((0.0, 0.0, 0.5, 0.5))})
+        self.own.add("band4", "US4XX1AA", {"DEPARE": square()})
+        self.own.add("band2", "US2EC03M", {"DEPARE": square()})                  # legacy name
+        self.own.add("band2", "US2ATLPF", {"DEPARE": square()})                  # new scheme (ATL)
+        self.own.add("band3", "US3XX1AA", {"M_COVR": square()})   # no skin-of-the-earth area: not a chart that speaks
+        self.other.add("band5", "US5YY1AA", {"DEPARE": square()})
+        self.other.add("band4", "US4XX1AA", {"DEPARE": square((5.0, 5.0, 6.0, 6.0))})    # also in the first folder
+        a, b = self.own.write(), self.other.write()
         cells = B.cell_index([a, b], str(self.work), 1)
         self.assertEqual([c[2] for c in cells], ["US5XX1AA", "US5YY1AA", "US4XX1AA", "US2ATLPF", "US2EC03M"])
         ranks = {c[2]: c[0] for c in cells}
@@ -143,58 +143,48 @@ class CellIndex(unittest.TestCase):
         self.assertEqual((own4[3], own4[4], own4[5]), (a, [0.0, 0.0, 1.0, 1.0], True), "read from the first folder")
         self.assertEqual({c[2]: c[5] for c in cells}["US5YY1AA"], False)
         self.assertEqual(next(c for c in cells if c[2] == "US5XX1AA")[4], [0.0, 0.0, 0.5, 0.5])
+        self.assertEqual(own4[6], {"DEPARE": str(Path(a) / "band4" / "DEPARE_US4XX1AA.geojson")}, "the files the list names")
 
-    def test_a_band_with_one_cell_has_files_without_the_cell_name(self):
-        # as the chart build exports it: DEPARE.geojson, and the cell's name only on its completion marker
-        root = write_cell(self.own, "band4", "US4XX1AA")
-        band = Path(root) / "band4"
-        (band / "DEPARE_US4XX1AA.geojson").rename(band / "DEPARE.geojson")
-        self.assertEqual(B.band_cells(root, "band4"), {"US4XX1AA": ""})
-        cells = B.cell_index([root], str(self.work), 1)
-        self.assertEqual([(c[2], c[4], c[6]) for c in cells], [("US4XX1AA", [0.0, 0.0, 1.0, 1.0], "")])
-
-    def test_an_unfinished_export_stops_the_build(self):
-        root = write_cell(self.own, "band5", "US5XX1AA")
-        write_cell(self.own, "band5", "US5XX1AB")
-        (Path(root) / "band5" / ".US5XX1AB.exported").unlink()
+    def test_a_folder_without_a_list_is_refused(self):
+        self.own.add("band5", "US5XX1AA", {"DEPARE": square()})        # the files are there, the list is not
         with self.assertRaises(RuntimeError) as cm:
-            B.band_cells(root, "band5")
-        self.assertIn("US5XX1AB", str(cm.exception))
+            B.listed_cells(str(self.own.path))
+        self.assertIn("no cells.json", str(cm.exception))
+        self.assertIn("did not finish", str(cm.exception))
 
-    def test_unnamed_files_beside_named_cells_stop_the_build(self):
-        root = write_cell(self.own, "band5", "US5XX1AA")
-        write_cell(self.own, "band5", "US5XX1AB")
-        (Path(root) / "band5" / "DEPARE.geojson").write_text('{"type": "FeatureCollection", "features": []}')
-        with self.assertRaises(RuntimeError):
-            B.band_cells(root, "band5")
+    def test_what_is_not_on_the_list_is_not_read(self):
+        self.own.add("band5", "US5XX1AA", {"DEPARE": square()})
+        self.own.add("band5", "US5XX1AB", {"DEPARE": square()}, listed=False)
+        root = self.own.write()
+        (Path(root) / "band5" / "DEPARE.geojson").write_text("not even JSON")       # a stray file
+        (Path(root) / "band4").mkdir()
+        (Path(root) / "band4" / "DEPARE_US4XX1AA.geojson").write_text("not even JSON")
+        self.assertEqual([c[1] for c in B.listed_cells(root)], ["US5XX1AA"])
+        self.assertEqual([c[2] for c in B.cell_index([root], str(self.work), 1)], ["US5XX1AA"])
 
-    def test_a_failure_in_the_export_log_stops_the_build(self):
-        # a cell whose layers could not even be listed leaves no file and no marker: only the chart build's
-        # own error log says it is missing
-        root = write_cell(self.own, "band5", "US5XX1AA")
-        log = Path(root) / "band5" / ".export-errors.log"
-        log.write_text("")
-        self.assertEqual(B.band_cells(root, "band5"), {"US5XX1AA": "_US5XX1AA"})
-        log.write_text("US5XX1AB: ogrinfo failed: not recognized as being in a supported file format\n")
+    def test_a_listed_file_that_is_missing_stops_the_build(self):
+        self.own.add("band5", "US5XX1AA", {"DEPARE": square(), "SOUNDG": []})
+        root = self.own.write()
+        (Path(root) / "band5" / "SOUNDG_US5XX1AA.geojson").unlink()
         with self.assertRaises(RuntimeError) as cm:
-            B.band_cells(root, "band5")
-        self.assertIn("US5XX1AB", str(cm.exception))
+            B.listed_cells(root)
+        self.assertIn("SOUNDG_US5XX1AA.geojson, which is not there", str(cm.exception))
 
-    def test_files_are_read_as_their_names_are_spelled(self):
-        # the exporter keeps the cell file's own spelling; the cell's identity is the upper-case name
-        root = write_cell(self.own, "band5", "US5XX1AA")
-        write_cell(self.own, "band5", "US5XX1AB")
-        band = Path(root) / "band5"
-        (band / "DEPARE_US5XX1AB.geojson").rename(band / "DEPARE_us5xx1ab.geojson")
-        (band / ".US5XX1AB.exported").rename(band / ".us5xx1ab.exported")
-        self.assertEqual(B.band_cells(root, "band5"), {"US5XX1AA": "_US5XX1AA", "US5XX1AB": "_us5xx1ab"})
-        (self.own / "cancelled-cells.json").write_text(json.dumps({"cancelled": [{"cell": "us5xx1aa"}]}))
-        cells = B.cell_index([root], str(self.work), 1)
-        self.assertEqual([(c[2], c[4], c[6]) for c in cells], [("US5XX1AB", [0.0, 0.0, 1.0, 1.0], "_us5xx1ab")])
-
-    def test_an_empty_or_missing_band_has_no_cells(self):
-        root = write_cell(self.own, "band5", "US5XX1AA")
-        self.assertEqual(B.band_cells(root, "band3"), {})
+    def test_a_list_this_build_cannot_read_is_refused(self):
+        self.own.add("band5", "US5XX1AA", {"DEPARE": square()})
+        root = self.own.write()
+        doc = json.loads((Path(root) / "cells.json").read_text())
+        for change, said in (({"version": 2}, "list version 2"),
+                             ({"cells": doc["cells"] * 2}, "listed twice"),
+                             ({"cells": [dict(doc["cells"][0], band=7)]}, "not a chart band"),
+                             ({"cells": [dict(doc["cells"][0], files={"DEPARE": "../elsewhere/DEPARE_US5XX1AA.geojson"})]},
+                              "not inside the folder"),
+                             ({"cells": [dict(doc["cells"][0], files={"DEPARE": str(Path(root) / "band5" / "DEPARE_US5XX1AA.geojson")})]},
+                              "not inside the folder")):
+            (Path(root) / "cells.json").write_text(json.dumps(dict(doc, **change)))
+            with self.assertRaises(RuntimeError) as cm:
+                B.listed_cells(root)
+            self.assertIn(said, str(cm.exception))
 
 
 if __name__ == "__main__":

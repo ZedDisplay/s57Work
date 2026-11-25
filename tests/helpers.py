@@ -53,6 +53,37 @@ HAVE_CGAL = bool((shutil.which("c++") or shutil.which("g++") or shutil.which("cl
                  and any((Path(d) / "CGAL").is_dir() for d in
                          ("/usr/include", "/usr/local/include", "/opt/homebrew/include")))
 
+class CellsFolder:
+    """A hand-over folder as `s57-to-mbtiles.py --by-band --cells-only` writes it: bandN/LAYER_CELL.geojson for
+    every layer of every cell, and cells.json, the list of the cells with their files, which build-mesh.py
+    reads and beyond which it reads nothing."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.cells = []
+
+    def add(self, band, cell, layers, listed=True):
+        """Write a cell's layer files ({layer: [GeoJSON features]}) and, unless listed is False, put the cell
+        on the list. An unlisted cell's files are in the folder and on no list."""
+        d = self.path / band
+        d.mkdir(parents=True, exist_ok=True)
+        files = {}
+        for layer, features in layers.items():
+            (d / f"{layer}_{cell}.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": features}))
+            files[layer] = f"{band}/{layer}_{cell}.geojson"
+        if listed:
+            self.cells.append({"cell": cell, "band": int(band[4:]), "edition": "1.0", "files": files})
+        return self
+
+    def write(self, cancelled=()):
+        """Write cells.json; returns the folder's path as a string."""
+        self.path.mkdir(parents=True, exist_ok=True)
+        (self.path / "cells.json").write_text(json.dumps({
+            "version": 1, "written": "2026-11-24T00:00:00Z", "inputs": ["TEST_ENCs.zip"], "cells": self.cells,
+            "cancelled_cells_left_out": sorted(cancelled)}))
+        return str(self.path)
+
+
 MESH_HEADER = 32
 # corners f64[6], neighbours i32[3], mult, depth, clear, hazv f32, rev i8[3], flags u8,
 # sideFlags u8[3], sideClear f32[3], sideHazv f32[3], cornerFlags u8[3], cornerVal f32[3]

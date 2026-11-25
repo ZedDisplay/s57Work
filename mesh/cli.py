@@ -3,14 +3,17 @@
     build-mesh.py CELLS [MORE_CELLS ...] --name 01CGD [-o data/tiles] [--work DIR] [-j N]
                   [--chart-json FILE] [--archive] [--keep-intermediate]
 
-CELLS is a folder of per-cell GeoJSON exports as s57-to-mbtiles.py writes
-them (data/geojson: bandN/LAYER_CELL.geojson, with data/cancelled-cells.json
-beside the folder). The first folder holds the district's own cells: the
-mesh is built for every 0.25-degree tile those cells reach. Any further
-folders hold other districts' cells, read where they reach those tiles
-(the most detailed chart wins, whichever district it is filed under).
+CELLS is a hand-over folder written by `s57-to-mbtiles.py --by-band
+--cells-only` (data/cells): the exported cells and cells.json, the list of
+them, which that tool writes last and only when every cell exported
+completely. The build reads the list and the files it names, nothing else
+in the folder; a folder without the list is refused. The first folder
+holds the district's own cells: the mesh is built for every 0.25-degree
+tile those cells reach. Any further folders hold other districts' cells,
+read where they reach those tiles (the most detailed chart wins, whichever
+district it is filed under).
 
-    <work>/cells.json, <work>/tiles/    the tile stage (mesh/build.py)
+    <work>/cell-index.json, <work>/tiles/    the tile stage (mesh/build.py)
     <out>/<name>_mesh/                  the mesh: binary tiles + index.json
     <out>/<name>_mesh.json              sidecar: what it was built from, extent, counts
     <out>/<name>_mesh.tar.zst           with --archive
@@ -84,25 +87,48 @@ def make_archive(out_dir, folder, log):
 
 
 def cells_record(work, roots):
-    """Per cells folder, from the tile stage's cell index: the live cells with charted areas, by band, and the
-    cancelled cells left out (the chart build's record beside the folder)."""
-    with open(os.path.join(work, "cells.json")) as f:
-        cells = json.load(f)                     # [rank, band, name, root, bbox, primary, file suffix]
+    """Per cells folder: what its list says (when it was written, from which inputs, how many cells it names, the
+    cancelled cells its export left out), and from the tile stage's cell index the cells of it the build reads
+    (those with charted areas), by band."""
+    from . import build
+    with open(os.path.join(work, build.CELL_INDEX)) as f:
+        cells = json.load(f)                     # [rank, band, name, root, bbox, primary, files]
     out = []
     for k, root in enumerate(roots):
+        with open(os.path.join(root, build.CELLS_LIST)) as f:
+            listed = json.load(f)
         mine = [c for c in cells if c[3] == root]
         by_band = {}
         for c in mine:
             by_band[c[1]] = by_band.get(c[1], 0) + 1
-        cancelled = []
-        cj = os.path.join(os.path.dirname(root.rstrip("/")), "cancelled-cells.json")
-        if os.path.exists(cj):
-            with open(cj) as f:
-                cancelled = sorted(c["cell"].upper() for c in json.load(f).get("cancelled", []))
         out.append({"folder": root, "role": "own" if k == 0 else "other district",
+                    "list_written": listed.get("written"), "inputs": listed.get("inputs"),
+                    "cells_listed": len(listed["cells"]),
                     "cells": len(mine), "cells_by_band": dict(sorted(by_band.items())),
-                    "cancelled_cells_left_out": cancelled})
+                    "cancelled_cells_left_out": listed.get("cancelled_cells_left_out", [])})
     return out
+
+
+def resolve_paths(ap, a):
+    """(cells folders, work folder, output folder), each resolved once (absolute, symbolic links followed), and
+    checked once. The build removes exactly two folders: <work>/tiles (before the tile stage and after a build
+    that passed) and <out>/<name>_mesh (before the build). No folder the build is given may be one of those two
+    or lie inside one. Everything after this uses the resolved paths only, so what was checked is what is read,
+    written and removed."""
+    for d in a.cells:
+        if not os.path.isdir(d):
+            ap.error(f"no such folder: {d}")
+    roots = [os.path.realpath(d) for d in a.cells]
+    work = os.path.realpath(a.work or os.path.join("data", "mesh", a.name))
+    out = os.path.realpath(a.out)
+    removed = (os.path.join(work, "tiles"), os.path.join(out, f"{a.name}_mesh"))
+    given = [(f"the cells folder {d}", r) for d, r in zip(a.cells, roots)]
+    given += [(f"the output directory {a.out}", out), (f"the work directory {a.work or work}", work)]
+    for what, path in given:
+        for folder in removed:
+            if path == folder or path.startswith(folder + os.sep):
+                ap.error(f"{what} is {folder} or lies inside it, and the build removes that folder")
+    return roots, work, out
 
 
 def tile_stage_record(work):
@@ -126,7 +152,8 @@ def tile_stage_record(work):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="build-mesh.py", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cells", nargs="+", help="folder(s) of per-cell GeoJSON; the first is the district's own")
+    ap.add_argument("cells", nargs="+", help="hand-over folder(s) written by s57-to-mbtiles.py --by-band --cells-only "
+                                             "(each holds cells.json); the first is the district's own")
     ap.add_argument("--name", required=True, help="output name, e.g. 01CGD")
     ap.add_argument("-o", "--out", default="data/tiles", help="output directory (default data/tiles)")
     ap.add_argument("--work", help="work directory (default data/mesh/<name>)")
@@ -137,9 +164,6 @@ def main(argv=None):
     ap.add_argument("--keep-intermediate", action="store_true",
                     help="keep <work>/tiles (the cut of every tile) after a successful build")
     a = ap.parse_args(argv)
-    for d in a.cells:
-        if not os.path.isdir(d):
-            ap.error(f"no such folder: {d}")
     chart_meta = None
     if a.chart_json:
         try:
@@ -147,26 +171,7 @@ def main(argv=None):
                 chart_meta = json.load(f)
         except (OSError, ValueError) as ex:
             ap.error(f"--chart-json {a.chart_json}: {ex}")
-    # Absolute, because the second stage runs in its own interpreter from the repository folder; and resolved
-    # (symbolic links followed) once, here, so that the folders checked below are the folders written to.
-    work = os.path.realpath(a.work or os.path.join("data", "mesh", a.name))
-    out = os.path.realpath(a.out)
-    def inside(path, folder):
-        """Is `path` the folder itself or something under it (by real path)?"""
-        path, folder = os.path.realpath(path), os.path.realpath(folder)
-        return os.path.commonpath([path, folder]) == folder
-
-    # <work>/tiles is emptied before the build and removed after it, and <out>/<name>_mesh is removed before it:
-    # neither the output nor a cells folder may be one of them or lie inside one.
-    emptied = os.path.join(work, "tiles")
-    replaced = os.path.join(out, f"{a.name}_mesh")
-    if inside(out, emptied):
-        ap.error(f"the output directory {out} is the work directory's tiles folder or lies inside it "
-                 f"({emptied}), which the build empties and removes")
-    for d in a.cells:
-        for folder in (emptied, replaced):
-            if inside(d, folder):
-                ap.error(f"the cells folder {d} is {folder} or lies inside it, which the build removes before reading the cells")
+    roots, work, out = resolve_paths(ap, a)
     os.makedirs(work, exist_ok=True)
     os.makedirs(out, exist_ok=True)
 
@@ -190,12 +195,11 @@ def main(argv=None):
     tiles_dir = os.path.join(work, "tiles")
     if os.path.isdir(tiles_dir):
         shutil.rmtree(tiles_dir)
-    if os.path.exists(os.path.join(work, "cells.json")):
-        os.remove(os.path.join(work, "cells.json"))
-    roots = [os.path.abspath(d) for d in a.cells]
+    if os.path.exists(os.path.join(work, build.CELL_INDEX)):
+        os.remove(os.path.join(work, build.CELL_INDEX))
     try:
         failed = build.run(work, a.workers, roots, log=log)
-    except RuntimeError as ex:               # the cells folders are not what the chart build exports
+    except RuntimeError as ex:               # a cells folder is not a complete hand-over (mesh/build.py listed_cells)
         log(f"ERROR: {ex}")
         return 1
     if failed:

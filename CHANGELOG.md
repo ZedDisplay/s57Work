@@ -30,9 +30,13 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   required. New tests: `tests/test_mesh_rules.py`,
   `tests/test_mesh_build.py`; `tests/test_mesh_pipeline.py` and
   `tests/test_mesh_clearance.py` rewritten. `count-mesh-triangles.py`
-  reads both formats. `s57-to-mbtiles.py --by-band --cells-only` stops
-  after the GDAL export of every band (band 6 included) and needs no
-  tippecanoe: it produces the mesh build's input.
+  reads both formats. `s57-to-mbtiles.py --by-band --cells-only` exports
+  every live cell of every band (band 6 included) into `data/cells/`,
+  emptied first, and writes `data/cells/cells.json`, the list of them,
+  last and only when every cell exported completely (exit 1 and no list
+  otherwise); it needs no tippecanoe. That folder is the mesh build's
+  input: `build-mesh.py` reads the list and the files it names and
+  nothing else, and never the tile build's working folder.
   `.github/workflows/build-mesh.yml` is rewritten for it (a `cells` job
   per district, then the build on its own and every other district's
   cells) and **has not yet been run; a release run would publish
@@ -91,6 +95,16 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rebuilds nothing. `.github/workflows/tests.yml` runs it on every push.
 
 ### Fixed
+- A band that grew from one cell to several in a reused `data/` folder
+  kept the first cell's plain `LAYER.geojson` files beside the new
+  `LAYER_CELL.geojson` ones, and consolidation merged the cell into each
+  layer a second time. A plain file in a folder whose inventory is not
+  exactly one cell is now removed with the other orphans
+  (`_remove_orphan_cells`). The CI builds start from an empty folder and
+  were not affected.
+- A cell's completion marker is removed before the cell is exported
+  again, not after its layers have been listed: a re-export that failed
+  at that first step left the marker of the earlier export standing.
 - Navigation mesh: open water whose finest chart is a coastal-band cell
   had no depth, hazard or sounding. The mesh build read the chart file's
   z16 tiles only, and the chart build renders band 3 to z14 and band 2 to
