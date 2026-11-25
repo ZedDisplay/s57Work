@@ -243,6 +243,43 @@ class NothingOfAnEarlierRunIsReused(unittest.TestCase):
         self.assertEqual(listed["cancelled_cells_left_out"], [])
         self.assertIn(h.FIXTURE_CANCELLED, [c["cell"] for c in listed["cells"]])
 
+    def test_a_run_that_fails_before_the_export_leaves_no_list(self):
+        # after a whole run, a run whose input cannot be read at all (a file that is no zip) fails while staging,
+        # long before the export: the list of the earlier run is gone all the same
+        zp = self.work / "MINI_ENCs.zip"
+        shutil.copy(h.FIXTURE_ZIP, zp)
+        first, listed = self.run_cells(zp)
+        self.assertEqual(first.returncode, 0, first.stdout[-2000:] + first.stderr[-2000:])
+        bad = self.work / "BROKEN_ENCs.zip"
+        bad.write_text("this is not a zip\n")
+        second, listed = self.run_cells(bad)
+        self.assertEqual(second.returncode, 1, second.stdout[-2000:] + second.stderr[-2000:])
+        self.assertIn("is not a ZIP or directory", second.stderr)
+        self.assertIsNone(listed)
+        self.assertFalse((self.work / "data" / "cells").exists(), "nothing of the earlier hand-over is left")
+
+    def test_nothing_given_may_lie_in_a_folder_the_run_empties(self):
+        # refused before anything is emptied: the input, the catalogue and the earlier hand-over are untouched
+        zp = self.work / "MINI_ENCs.zip"
+        shutil.copy(h.FIXTURE_ZIP, zp)
+        first, _ = self.run_cells(zp)
+        self.assertEqual(first.returncode, 0, first.stdout[-2000:] + first.stderr[-2000:])
+        data = self.work / "data"
+        inside = [data / "cells" / "IN_ENCs.zip", data / "cells-work" / "IN_ENCs.zip"]
+        for p in inside:
+            shutil.copy(h.FIXTURE_ZIP, p)
+        catalog = data / "cells-work" / "cat.xml"
+        catalog.write_text("<x/>")
+        for args, what in (([str(inside[0])], "input"), ([str(inside[1])], "input"),
+                           ([str(zp), "--catalog", str(catalog)], "--catalog")):
+            r = h.run_pipeline(self.work, *args, "--by-band", "--no-replacements", "--cells-only", "-j", "2")
+            self.assertEqual(r.returncode, 2, r.stdout[-2000:] + r.stderr[-2000:])
+            self.assertIn(what, r.stderr)
+            self.assertIn("which --cells-only empties before it reads its inputs", r.stderr)
+            for p in inside + [catalog]:
+                self.assertTrue(p.exists(), f"{p} untouched")
+            self.assertTrue((data / "cells" / "cells.json").exists(), "the earlier hand-over is untouched")
+
     def test_a_cell_that_no_longer_exports_leaves_no_list(self):
         # every cell exports; then one cell of the input is replaced by something GDAL cannot read: the next run
         # exits 1 and leaves no list (the list of the first run does not stand over a folder that no longer

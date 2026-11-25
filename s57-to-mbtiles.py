@@ -2853,9 +2853,8 @@ def export_cells(
     max_workers: int,
 ) -> Path:
     """--cells-only: the hand-over to build-mesh.py. Every live cell of
-    every band is exported into cells_dir (data/cells/), which is emptied
-    first, and cells.json is written there last, only when every cell
-    exported completely. Returns the list's path; exits 1, with no list,
+    every band is exported into cells_dir (data/cells/), and cells.json
+    is written there last, only when every cell exported completely. Returns the list's path; exits 1, with no list,
     when a cell did not finish.
 
     data_dir is this run's own working folder (data/cells-work/, emptied
@@ -2864,9 +2863,8 @@ def export_cells(
     left. The hand-over holds what this run exported and nothing else, so
     the list can say exactly what is in it. A reader takes the list as
     the whole truth: the cells it names, each with the files it names; no
-    list, no cells. Files are always LAYER_CELL.geojson here."""
-    if cells_dir.exists():
-        shutil.rmtree(cells_dir)
+    list, no cells. Files are always LAYER_CELL.geojson here. main has
+    emptied cells_dir at the start of the run; it must not exist here."""
     cells_dir.mkdir(parents=True)
     print("\n-- Cells only: exporting every band to "
           f"{cells_dir} ------------------")
@@ -3335,16 +3333,33 @@ def main():
                 print(f"ERROR: {p} not found", file=sys.stderr)
                 sys.exit(1)
 
-        # --cells-only works in a folder of its own, emptied first: the
-        # staged inputs, the cells' band copies, the DSID reads and the
-        # records of this run only. Nothing an earlier run left is read,
-        # so nothing has to be judged fresh or stale (the tile build's
-        # resume, by names and file times, is for the tile build).
+        # --cells-only starts from nothing: it empties the hand-over
+        # folder (data/cells) and its own working folder (data/cells-work)
+        # before it does anything that can fail, so a run that has started
+        # and then fails leaves no list, and nothing an earlier run left is
+        # read (no stale state to judge; the tile build's resume, by names
+        # and file times, is for the tile build). Nothing it was given may
+        # lie in either folder: it would be deleted before it is read.
         work_dir = data_dir
         if args.cells_only:
             work_dir = data_dir / "cells-work"
-            if work_dir.exists():
-                shutil.rmtree(work_dir)
+            emptied = [data_dir / "cells", work_dir]
+            for folder in emptied:
+                if folder.is_symlink():
+                    parser.error(f"{folder} is a symbolic link; --cells-only empties "
+                                 f"that folder and needs it to be a real folder")
+            given = [(f"input {p}", p) for p in input_paths]
+            if args.catalog:
+                given.append((f"--catalog {args.catalog}", Path(args.catalog).resolve()))
+            for what, path in given:
+                for folder in emptied:
+                    real = folder.resolve()
+                    if path == real or real in path.parents:
+                        parser.error(f"{what} lies in {folder}, which --cells-only "
+                                     f"empties before it reads its inputs")
+            for folder in emptied:
+                if folder.exists():
+                    shutil.rmtree(folder)
             setup_data_dir(work_dir)
 
         # process_by_band returns one .mbtiles per band, ordered coarse → fine
