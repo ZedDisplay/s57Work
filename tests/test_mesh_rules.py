@@ -20,6 +20,7 @@ state is inside: (layer, properties, rank, order). What is pinned:
     build cannot read are refused.
 """
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -143,7 +144,8 @@ class CellIndex(unittest.TestCase):
         self.assertEqual((own4[3], own4[4], own4[5]), (a, [0.0, 0.0, 1.0, 1.0], True), "read from the first folder")
         self.assertEqual({c[2]: c[5] for c in cells}["US5YY1AA"], False)
         self.assertEqual(next(c for c in cells if c[2] == "US5XX1AA")[4], [0.0, 0.0, 0.5, 0.5])
-        self.assertEqual(own4[6], {"DEPARE": str(Path(a) / "band4" / "DEPARE_US4XX1AA.geojson")}, "the files the list names")
+        self.assertEqual(own4[6], {"DEPARE": os.path.realpath(Path(a) / "band4" / "DEPARE_US4XX1AA.geojson")},
+                         "the files the list names, where they really are")
 
     def test_a_folder_without_a_list_is_refused(self):
         self.own.add("band5", "US5XX1AA", {"DEPARE": square()})        # the files are there, the list is not
@@ -169,6 +171,19 @@ class CellIndex(unittest.TestCase):
         with self.assertRaises(RuntimeError) as cm:
             B.listed_cells(root)
         self.assertIn("SOUNDG_US5XX1AA.geojson, which is not there", str(cm.exception))
+
+    def test_a_listed_file_that_is_a_link_out_of_the_folder_is_refused(self):
+        # judged by where the file really is, not by how its path reads
+        self.own.add("band5", "US5XX1AA", {"DEPARE": square()})
+        root = self.own.write()
+        outside = Path(self.tmp.name) / "outside.geojson"
+        outside.write_text(json.dumps({"type": "FeatureCollection", "features": square()}))
+        listed = Path(root) / "band5" / "DEPARE_US5XX1AA.geojson"
+        listed.unlink()
+        listed.symlink_to(outside)
+        with self.assertRaises(RuntimeError) as cm:
+            B.listed_cells(root)
+        self.assertIn("which is not inside the folder", str(cm.exception))
 
     def test_a_list_this_build_cannot_read_is_refused(self):
         self.own.add("band5", "US5XX1AA", {"DEPARE": square()})

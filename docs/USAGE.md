@@ -129,7 +129,7 @@ How it works:
 
 1. Extracts all ZIPs / copies all directories into a staging area (`data/enc/all/input0`, `input1`, etc.)
 2. Finds every `.000` file recursively and drops **cancelled cells**. NOAA withdraws a cell with an S-57 cancellation update (a DSID-only update setting the edition number to 0) and, as of September 2026, still ships the withdrawn cells in the district zips. GDAL applies the update but keeps the data, so without this step the pipeline renders charts that no longer exist on top of their replacements. Excluded cells are listed in `data/cancelled-cells.json`; the DSID reads are cached in `data/enc/.cell-editions.json`.
-3. Groups files by NOAA usage band (the first digit after `US` in the filename)
+3. Keeps one copy of each cell: when several inputs carry the same cell, the latest issued copy (DSID issue date after updates) is used and the others are left out, recorded in `data/duplicate-cells.json`; copies issued the same day in different states stop the run. Then groups files by NOAA usage band (the first digit after `US` in the filename)
 4. Runs GDAL → consolidate → tippecanoe separately for each band, bands in parallel. Each band renders **two zoom levels past its native ceiling**, capped at `--maxzoom`, so wherever no finer chart exists the best available band still fills the deeper zooms, and **two zoom levels below its native floor**, capped at `--minzoom`, so where NOAA has no chart of the band native to a zoom (the band 2 gap off North Carolina left by the cancelled US2EC02M) the finer chart fills it instead of leaving it blank (`band_render_range`):
 
 | Band | Type | Scale | Native zoom | Renders (defaults z9–z16) |

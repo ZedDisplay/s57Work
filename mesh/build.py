@@ -145,6 +145,9 @@ def listed_cells(root):
         doc = json.load(fh)
     if doc.get("version") != CELLS_LIST_VERSION:
         raise RuntimeError(f"{path}: list version {doc.get('version')!r}, this build reads version {CELLS_LIST_VERSION}")
+    # Inside the folder means the file itself, after symbolic links are followed, as everywhere else in the build
+    # (mesh/cli.py resolve_paths): a path is compared once it is real, never as text.
+    real_root = os.path.realpath(root)
     out, seen = [], set()
     for c in doc["cells"]:
         name, band = c["cell"], f"band{c['band']}"
@@ -155,8 +158,8 @@ def listed_cells(root):
         seen.add(name)
         files = {}
         for layer, rel in c["files"].items():
-            full = os.path.normpath(os.path.join(root, rel))
-            if os.path.isabs(rel) or os.path.commonpath([full, root]) != root:
+            full = os.path.realpath(os.path.join(real_root, rel))
+            if os.path.isabs(rel) or os.path.commonpath([full, real_root]) != real_root:
                 raise RuntimeError(f"{path}: cell {name} lists {rel!r}, which is not inside the folder")
             if not os.path.isfile(full):
                 raise RuntimeError(f"{path}: cell {name} lists {rel}, which is not there")
