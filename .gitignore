@@ -4,6 +4,9 @@ data/enc/*
 data/geojson/*
 data/merged/*
 data/tiles/*
+# --cells-only: the hand-over to build-mesh.py and the run's own working folder
+data/cells/
+data/cells-work/
 # Mesh build work directory (z16 pickles, tile/mesh .npz, logs)
 data/mesh/*
 # Bathymetry pilot work directory (venv, downloads, composites; code on branch a-world-apart)

@@ -17,6 +17,7 @@ What is pinned here:
   * the sidecar and the archive.
 """
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -198,8 +199,6 @@ class ACellThatDoesNotExport(unittest.TestCase):
     def test_with_the_cell_gone_the_next_export_is_whole(self):
         # (runs after the two above: unittest takes a class's tests in name order)
         shutil.rmtree(self.work / "src" / "ENC_ROOT" / "US5ZZ9ZZ")
-        for staged in (self.work / "data" / "enc" / "all").glob("*/ENC_ROOT/US5ZZ9ZZ"):
-            shutil.rmtree(staged)
         again = h.run_pipeline(self.work, *self.args)
         self.assertEqual(again.returncode, 0, again.stdout[-2000:] + again.stderr[-2000:])
         listed = json.loads((self.cells / "cells.json").read_text())
@@ -209,31 +208,55 @@ class ACellThatDoesNotExport(unittest.TestCase):
 
 
 @unittest.skipUnless(h.HAVE_GDAL, "needs ogr2ogr/ogrinfo")
-class ACellThatFailsToExportAgain(unittest.TestCase):
-    """Every cell exports and the list is written; then one cell's file is replaced by something GDAL cannot
-    read. The next export must exit 1 and leave no list: the list of the first run is not left standing over a
-    folder that no longer matches it."""
+class NothingOfAnEarlierRunIsReused(unittest.TestCase):
+    """--cells-only works in data/cells-work, emptied at the start of every run, and reads nothing an earlier
+    run left. Two runs on the same folder and the same input name, the input changed in between."""
 
-    def test_the_earlier_list_does_not_stand(self):
+    def setUp(self):
         import zipfile
-        work = Path(tempfile.mkdtemp(prefix="s57reexport-"))
-        try:
-            with zipfile.ZipFile(h.FIXTURE_ZIP) as z:
-                z.extractall(work / "src")
-            args = (str(work / "src"), "--by-band", "--no-replacements", "--cells-only", "-j", "2")
-            first = h.run_pipeline(work, *args)
-            self.assertEqual(first.returncode, 0, first.stdout[-2000:] + first.stderr[-2000:])
-            self.assertTrue((work / "data" / "cells" / "cells.json").exists())
-            cell = h.FIXTURE_BAND5[0]
-            staged = list((work / "data" / "enc" / "all").glob(f"*/ENC_ROOT/{cell}/{cell}.000"))
-            self.assertEqual(len(staged), 1)
-            staged[0].write_text("this is no longer an S-57 cell\n")
-            second = h.run_pipeline(work, *args)
-            self.assertEqual(second.returncode, 1, second.stdout[-2000:] + second.stderr[-2000:])
-            self.assertIn(f"did not export completely: {cell} (band 5)", second.stderr)
-            self.assertFalse((work / "data" / "cells" / "cells.json").exists())
-        finally:
-            shutil.rmtree(work, ignore_errors=True)
+        self.work = Path(tempfile.mkdtemp(prefix="s57fresh-"))
+        self.zipfile = zipfile
+
+    def tearDown(self):
+        shutil.rmtree(self.work, ignore_errors=True)
+
+    def run_cells(self, inp):
+        r = h.run_pipeline(self.work, str(inp), "--by-band", "--no-replacements", "--cells-only", "-j", "2")
+        listed = self.work / "data" / "cells" / "cells.json"
+        return r, (json.loads(listed.read_text()) if listed.exists() else None)
+
+    def test_a_changed_input_of_the_same_name_is_read_anew(self):
+        # first the whole fixture (its cancelled cell cancelled); then a zip of the same name in which that cell
+        # has no cancellation update: the cell is live now and must be exported, not taken from the first run
+        zp = self.work / "MINI_ENCs.zip"
+        shutil.copy(h.FIXTURE_ZIP, zp)
+        first, listed = self.run_cells(zp)
+        self.assertEqual(first.returncode, 0, first.stdout[-2000:] + first.stderr[-2000:])
+        self.assertEqual(listed["cancelled_cells_left_out"], [h.FIXTURE_CANCELLED])
+        with self.zipfile.ZipFile(h.FIXTURE_ZIP) as src, self.zipfile.ZipFile(zp, "w") as dst:
+            for m in src.infolist():
+                if os.path.basename(m.filename) != f"{h.FIXTURE_CANCELLED}.001":
+                    dst.writestr(m, src.read(m))
+        second, listed = self.run_cells(zp)
+        self.assertEqual(second.returncode, 0, second.stdout[-2000:] + second.stderr[-2000:])
+        self.assertNotIn("already staged", second.stdout)
+        self.assertEqual(listed["cancelled_cells_left_out"], [])
+        self.assertIn(h.FIXTURE_CANCELLED, [c["cell"] for c in listed["cells"]])
+
+    def test_a_cell_that_no_longer_exports_leaves_no_list(self):
+        # every cell exports; then one cell of the input is replaced by something GDAL cannot read: the next run
+        # exits 1 and leaves no list (the list of the first run does not stand over a folder that no longer
+        # matches it)
+        with self.zipfile.ZipFile(h.FIXTURE_ZIP) as z:
+            z.extractall(self.work / "src")
+        first, listed = self.run_cells(self.work / "src")
+        self.assertEqual(first.returncode, 0, first.stdout[-2000:] + first.stderr[-2000:])
+        cell = h.FIXTURE_BAND5[0]
+        (self.work / "src" / "ENC_ROOT" / cell / f"{cell}.000").write_text("this is no longer an S-57 cell\n")
+        second, listed = self.run_cells(self.work / "src")
+        self.assertEqual(second.returncode, 1, second.stdout[-2000:] + second.stderr[-2000:])
+        self.assertIn(f"did not export completely: {cell} (band 5)", second.stderr)
+        self.assertIsNone(listed)
 
 
 class OrphanFiles(unittest.TestCase):

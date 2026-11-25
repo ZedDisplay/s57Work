@@ -32,7 +32,8 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `tests/test_mesh_clearance.py` rewritten. `count-mesh-triangles.py`
   reads both formats. `s57-to-mbtiles.py --by-band --cells-only` exports
   every live cell of every band (band 6 included) into `data/cells/`,
-  emptied first, and writes `data/cells/cells.json`, the list of them,
+  emptied first, does all of its work in `data/cells-work/`, also emptied
+  first, so nothing of an earlier run is reused, and writes `data/cells/cells.json`, the list of them,
   last and only when every cell exported completely (exit 1 and no list
   otherwise); it needs no tippecanoe. That folder is the mesh build's
   input: `build-mesh.py` reads the list and the files it names and

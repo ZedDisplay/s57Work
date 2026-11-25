@@ -25,8 +25,11 @@ One or more hand-over folders written by
   files, the inputs it was exported from, and the cancelled cells that
   were left out.
 
-The chart tool empties the folder before it exports and writes the list
-last, only when every cell exported completely; when a cell fails it
+The chart tool empties the folder before it exports, does all of the
+run's work (unpacking, the cells' band copies, reading their editions)
+in `data/cells-work`, which it also empties first, so nothing of an
+earlier run is read, and writes the list last, only when every cell
+exported completely; when a cell fails it
 exits 1 and there is no list. So the list exists only for a whole export
 and describes a folder that held nothing before it.
 

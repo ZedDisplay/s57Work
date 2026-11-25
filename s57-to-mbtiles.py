@@ -358,8 +358,10 @@ Skip GDAL (use existing GeoJSON):
                              "emptied first, and write data/cells/cells.json "
                              "when all of them exported completely (exit 1 "
                              "and no list otherwise). That folder is what "
-                             "build-mesh.py reads. No tiles are built and "
-                             "tippecanoe is not needed")
+                             "build-mesh.py reads. All of the run's work is "
+                             "done in data/cells-work/, emptied first: "
+                             "nothing of an earlier run is reused. No tiles "
+                             "are built and tippecanoe is not needed")
     parser.add_argument("--pmtiles", action="store_true",
                         help="Also write a PMTiles archive of the final "
                              "tileset beside it (same tiles, layers and "
@@ -367,10 +369,12 @@ Skip GDAL (use existing GeoJSON):
     return parser
 
 
-def setup_data_dir() -> Path:
+def setup_data_dir(base: Path = DATA_DIR) -> Path:
+    """The data folder (or --cells-only's own working folder) with the
+    sub-folders every stage writes into."""
     for sub in ("zips", "enc", "geojson", "merged", "tiles"):
-        (DATA_DIR / sub).mkdir(parents=True, exist_ok=True)
-    return DATA_DIR
+        (base / sub).mkdir(parents=True, exist_ok=True)
+    return base
 
 
 def resolve_output_name(args) -> str:
@@ -2842,24 +2846,25 @@ CELLS_LIST_VERSION = 1
 def export_cells(
     by_band: Dict[int, List[Path]],
     data_dir: Path,
+    cells_dir: Path,
     inputs: List[Path],
     native_gdal: bool,
     runtime: Optional[str],
     max_workers: int,
 ) -> Path:
     """--cells-only: the hand-over to build-mesh.py. Every live cell of
-    every band is exported into data/cells/, which is emptied first, and
-    data/cells/cells.json is written last, only when every cell exported
-    completely. Returns the list's path; exits 1, with no list, when a
-    cell did not finish.
+    every band is exported into cells_dir (data/cells/), which is emptied
+    first, and cells.json is written there last, only when every cell
+    exported completely. Returns the list's path; exits 1, with no list,
+    when a cell did not finish.
 
-    The folder is never resumed and never shared with the tile build
-    (whose own exports stay in data/geojson with its resume markers): it
-    holds what this run exported and nothing else, so the list can say
-    exactly what is in it. A reader takes the list as the whole truth:
-    the cells it names, each with the files it names; no list, no cells.
-    Files are always LAYER_CELL.geojson here."""
-    cells_dir = data_dir / "cells"
+    data_dir is this run's own working folder (data/cells-work/, emptied
+    at the start of the run: see main): the staged inputs, the cells'
+    band copies and the DSID reads are this run's, nothing an earlier run
+    left. The hand-over holds what this run exported and nothing else, so
+    the list can say exactly what is in it. A reader takes the list as
+    the whole truth: the cells it names, each with the files it names; no
+    list, no cells. Files are always LAYER_CELL.geojson here."""
     if cells_dir.exists():
         shutil.rmtree(cells_dir)
     cells_dir.mkdir(parents=True)
@@ -3005,6 +3010,7 @@ def process_by_band(
     replacements: bool = True,
     catalog_path: Optional[Path] = None,
     cells_only: bool = False,
+    cells_out: Optional[Path] = None,
 ) -> Tuple[List[Path], Optional[int]]:
     """The by-band pipeline: stage inputs, drop cancelled cells and fetch
     their replacements, export per band, resolve same-band overlaps,
@@ -3012,9 +3018,10 @@ def process_by_band(
     1-2 to the district region. Returns the tilesets for tile-join and
     the bundle's scale (bundle_scale; None when unknown). With cells_only
     the inventory (cancelled cells dropped, replacements fetched) is
-    exported by export_cells instead, every band of it (band 6 included:
-    no zoom range applies when nothing is rendered), and no tilesets are
-    returned."""
+    exported by export_cells into cells_out instead, every band of it
+    (band 6 included: no zoom range applies when nothing is rendered), and
+    no tilesets are returned; data_dir is then the run's own empty working
+    folder."""
     print("\n-- By-band mode ---------------------------------------------------")
 
     # Stage 1: stage all inputs
@@ -3061,8 +3068,8 @@ def process_by_band(
               f"will be skipped.", file=sys.stderr)
 
     if cells_only:
-        export_cells(by_band, data_dir, inputs, native_gdal, runtime,
-                     max_workers)
+        export_cells(by_band, data_dir, cells_out, inputs, native_gdal,
+                     runtime, max_workers)
         return [], cscl
 
     # Print band inventory
@@ -3328,13 +3335,25 @@ def main():
                 print(f"ERROR: {p} not found", file=sys.stderr)
                 sys.exit(1)
 
+        # --cells-only works in a folder of its own, emptied first: the
+        # staged inputs, the cells' band copies, the DSID reads and the
+        # records of this run only. Nothing an earlier run left is read,
+        # so nothing has to be judged fresh or stale (the tile build's
+        # resume, by names and file times, is for the tile build).
+        work_dir = data_dir
+        if args.cells_only:
+            work_dir = data_dir / "cells-work"
+            if work_dir.exists():
+                shutil.rmtree(work_dir)
+            setup_data_dir(work_dir)
+
         # process_by_band returns one .mbtiles per band, ordered coarse → fine
         tile_files, scale = process_by_band(
-            input_paths, data_dir, args.minzoom, args.maxzoom,
+            input_paths, work_dir, args.minzoom, args.maxzoom,
             native_gdal, runtime, args.jobs,
             replacements=not args.no_replacements,
             catalog_path=Path(args.catalog).resolve() if args.catalog else None,
-            cells_only=args.cells_only)
+            cells_only=args.cells_only, cells_out=data_dir / "cells")
 
         if args.cells_only:
             cells_list = data_dir / "cells" / CELLS_LIST

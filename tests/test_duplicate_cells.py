@@ -93,7 +93,7 @@ class TheSameCellInTwoInputs(unittest.TestCase):
             self.assertEqual(sorted(names), sorted((h.FIXTURE_BAND4,) + h.FIXTURE_BAND5), "each cell once")
             self.assertEqual(listed["cancelled_cells_left_out"], [h.FIXTURE_CANCELLED],
                              "the latest copy of the cancelled cell is its cancellation")
-            record = json.loads((work / "data" / "duplicate-cells.json").read_text())
+            record = json.loads((work / "data" / "cells-work" / "duplicate-cells.json").read_text())
             kept = {c["cell"]: c["kept"] for c in record["cells"]}
             self.assertEqual(len(kept), 5)
             self.assertIn("/input1/", kept[h.FIXTURE_CANCELLED], "the copy from the whole zip, given second")
