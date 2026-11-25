@@ -766,6 +766,83 @@ def bundle_scale(enc_files: List[Path], data_dir: Path, gdal: "GdalRunner",
     return BAND_NOMINAL_SCALE[max(bands)] if bands else None
 
 
+def latest_copy(name: str, copies: List[Tuple[Path, Dict[str, Optional[str]]]]) -> Path:
+    """Of several copies of one cell (path, its DSID with updates applied),
+    the one to build from: the latest issued (DSID ISDT, the issue date of
+    the base or of the last update applied). Not the highest edition: a
+    cancellation is the newest state of a cell and has edition 0. A copy
+    whose issue date cannot be read, or two copies issued the same day in
+    different states (EDTN.UPDN), cannot be decided between: ValueError,
+    naming the cell. Copies in the same state are the same cell; the first
+    given is used."""
+    dates = [(info.get("ISDT") or "") for _, info in copies]
+    if not all(d.isdigit() and len(d) == 8 for d in dates):
+        raise ValueError(f"{name}: the issue date of a copy cannot be read "
+                         f"({', '.join(str(c[0]) for c, d in zip(copies, dates) if not (d.isdigit() and len(d) == 8))})")
+    latest = max(dates)
+    at = [(c, info) for (c, info), d in zip(copies, dates) if d == latest]
+    states = sorted({cell_version(info) for _, info in at})
+    if len(states) > 1:
+        raise ValueError(f"{name}: copies issued the same day ({latest}) "
+                         f"in different states ({', '.join(states)}): "
+                         + ", ".join(str(c) for c, _ in at))
+    return at[0][0]
+
+
+def one_copy_per_cell(enc_files: List[Path], gdal: "GdalRunner",
+                      max_workers: int, record_path: Path) -> List[Path]:
+    """The inventory with one copy of each cell. Several inputs can carry
+    the same cell (a district zip and the state zips overlap; inputs
+    downloaded on different days can hold different editions of it), and
+    everything after this point is keyed by cell name: the DSID cache, the
+    band folders the cell's files are copied into, the export's markers,
+    the cell list. Two copies there mixed one copy's base with the other's
+    update files. The copy kept is latest_copy's; each copy's DSID is read
+    directly (not through the cache, which holds one entry per name).
+    Writes record_path listing the cells given more than once and the copy
+    kept. Exits 1 when a cell's copies cannot be decided between."""
+    by_name: Dict[str, List[Path]] = {}
+    for e in enc_files:
+        by_name.setdefault(e.stem.upper(), []).append(e)
+    several = {n: c for n, c in by_name.items() if len(c) > 1}
+    chosen: Dict[str, Path] = {}
+    record = {"rule": "one copy per cell: the latest issued (DSID ISDT after updates)",
+              "cells": []}
+    if several:
+        paths = [c for cs in several.values() for c in cs]
+        with ThreadPoolExecutor(max_workers=max(1, max_workers) * 2) as pool:
+            infos = dict(zip(paths, pool.map(lambda e: read_cell_dsid(e, gdal), paths)))
+        problems = []
+        for n in sorted(several):
+            copies = [(c, infos[c]) for c in several[n]]
+            try:
+                chosen[n] = latest_copy(n, copies)
+            except ValueError as ex:
+                problems.append(str(ex))
+                continue
+            record["cells"].append({
+                "cell": n, "kept": str(chosen[n]),
+                "copies": [{"path": str(c), "issued": info.get("ISDT"),
+                            "state": cell_version(info)} for c, info in copies]})
+        if problems:
+            for msg in problems[:10]:
+                print(f"ERROR: {msg}", file=sys.stderr)
+            print(f"ERROR: {len(problems)} cell(s) are given more than once "
+                  f"and their copies cannot be decided between",
+                  file=sys.stderr)
+            sys.exit(1)
+        print(f"{len(several)} cell(s) are in more than one input: building "
+              f"each from its latest issued copy (record: {record_path.name})")
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(json.dumps(record, indent=1))
+    kept = []
+    for e in enc_files:
+        n = e.stem.upper()
+        if n not in several or chosen[n] == e:
+            kept.append(e)
+    return kept
+
+
 def drop_cancelled_cells(enc_files: List[Path], data_dir: Path,
                          gdal: "GdalRunner", max_workers: int,
                          record_path: Path) -> List[Path]:
@@ -2733,18 +2810,26 @@ def resolve_same_band_overlaps(band: int, label: str,
 # ---------------------------------------------------------------------------
 
 def stage_band_cells(enc_files: List[Path], band_enc_dir: Path) -> List[Path]:
-    """Copy each cell's .000 base AND any .001..NNN ER update files into
-    the band's folder and return the copies' .000 paths. Without the update
-    files, ogr2ogr applies only the base: incremental NOAA chart updates
-    would be silently dropped."""
+    """Make each cell's copy in the band's folder exactly its source: the
+    .000 base AND every .001..NNN ER update file of the source, and no
+    other file of that cell (without the update files ogr2ogr applies only
+    the base, so NOAA's chart updates would be dropped; with an update file
+    left from an earlier copy, a new edition got an old edition's updates).
+    Return the copies' .000 paths."""
     band_enc_dir.mkdir(parents=True, exist_ok=True)
     band_cells: List[Path] = []
     for enc_file in enc_files:
         cell_stem = enc_file.stem
-        for src in enc_file.parent.glob(f"{cell_stem}.*"):
-            dest = band_enc_dir / src.name
-            if (not dest.exists()
-                    or src.stat().st_mtime > dest.stat().st_mtime):
+        sources = {src.name: src for src in enc_file.parent.glob(f"{cell_stem}.*")}
+        for old in band_enc_dir.glob(f"{cell_stem}.*"):
+            if old.name not in sources:
+                old.unlink()
+        for name, src in sources.items():
+            dest = band_enc_dir / name
+            # copy2 keeps the time stamp, so a copy that is the source has
+            # its size and time; anything else is replaced
+            st, dt = src.stat(), dest.stat() if dest.exists() else None
+            if dt is None or dt.st_size != st.st_size or dt.st_mtime_ns != st.st_mtime_ns:
                 shutil.copy2(src, dest)
         band_cells.append(band_enc_dir / enc_file.name)
     return band_cells
@@ -2946,6 +3031,9 @@ def process_by_band(
     all_enc = find_enc_files(staging_dir)
     print(f"Total ENC files found: {len(all_enc)}")
     gdal_probe = GdalRunner(native_gdal, runtime, data_dir)
+    # One copy of each cell, before anything is keyed by cell name.
+    all_enc = one_copy_per_cell(all_enc, gdal_probe, max_workers,
+                                data_dir / "duplicate-cells.json")
     all_enc = drop_cancelled_cells(all_enc, data_dir, gdal_probe, max_workers,
                                    data_dir / "cancelled-cells.json")
 
