@@ -95,6 +95,20 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rebuilds nothing. `.github/workflows/tests.yml` runs it on every push.
 
 ### Fixed
+- By-band: a cell given in more than one input (a district zip and the
+  state zips overlap; inputs downloaded on different days can hold
+  different editions) was two entries in the inventory, and both were
+  copied by file name into one band folder: one copy's base file next to
+  the other's update files. Measured on the zips on the developer's Mac
+  (01CGD of 2026-09-07, CT, MA, NY, RI of 2026-03-25): 626 cells in more
+  than one zip, 192 of them different. The inventory now holds one copy
+  of each cell, the latest issued (DSID ISDT after updates; not the
+  highest edition, since a cancellation has edition 0), chosen right
+  after staging (`one_copy_per_cell`, record in
+  `data/duplicate-cells.json`); copies issued the same day in different
+  states stop the run. A cell's band copy is now exactly its source
+  (`stage_band_cells`): update files left from an earlier copy go. The
+  CI builds take one zip per district and were not affected.
 - A band that grew from one cell to several in a reused `data/` folder
   kept the first cell's plain `LAYER.geojson` files beside the new
   `LAYER_CELL.geojson` ones, and consolidation merged the cell into each
