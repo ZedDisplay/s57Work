@@ -20,8 +20,6 @@ it: its box goes the short way.
 Needs the mesh packages and a C++ compiler with CGAL; skips without.
 """
 import json
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,15 +39,10 @@ C_HAZARD = 1
 
 
 def build(base, name, cells):
-    """Write the cells as a hand-over folder under base/own and run build-mesh.py on it; returns (process, mesh
+    """Run the mesh build on the hand-made cells (tests/helpers.py build_from_shapes); returns (process, mesh
     arrays)."""
-    own = h.CellsFolder(Path(base) / "own")
-    for band, cell, layers in cells:
-        own.add(band, cell, layers)
-    proc = subprocess.run(
-        [sys.executable, str(h.ROOT / "build-mesh.py"), own.write(), "--name", name,
-         "-o", str(Path(base) / "out"), "--work", str(Path(base) / "work"), "-j", "2"],
-        cwd=h.ROOT, capture_output=True, text=True)
+    given = [h.shapes_cell(Path(base) / "shapes", band, cell, layers) for band, cell, layers in cells]
+    proc = h.build_from_shapes(base, name, given)
     if proc.returncode != 0:
         raise AssertionError(f"build-mesh failed ({proc.returncode}):\n" + proc.stdout[-4000:] + proc.stderr[-4000:])
     return proc, h.read_mesh(Path(base) / "out" / f"{name}_mesh")

@@ -6,18 +6,26 @@ interpreter: python -m mesh.finalize <work dir> <out mesh dir> <workers> <name>
             only where the two labels differ or a chart line lies on it. Then, once for the whole mesh: a corner
             where exactly two outline pieces of the same input segment meet, with the same water on both sides
             and the same mark, is not a corner. No corner is moved or matched by distance anywhere.
-  shape     Triangle ("pq20A"), with one east-west scale for the mesh (cos of its middle latitude); that scale
+  shape     Triangle ("pq20"), with one east-west scale for the mesh (cos of its middle latitude); that scale
             only affects how "well-shaped" is judged, never where anything is. Chart points are corners.
+            Triangle is given the outline and the chart points only: no point per water part and no point per
+            hole. It triangulates everything the outline encloses, land included; each triangle is then
+            looked up in the cut by its centre (exactly) and takes that cut triangle's label, and the ones
+            that are not water are dropped. (Until 2026-11-27 Triangle was given a point per water part and a
+            point per hole; a hole point outside the hull of the corners made Triangle crash.)
   marks     Each triangle side lying on a chart line carries that line's mark; each corner that is a chart point
             carries the point's mark.
   shore     The shore multiplier: on a 0.00025-degree lattice (origin -75.5, 38.7), 1.0 at 2 km or more from
             the chart's land (as cut) rising to 1.3 at the shore, except in narrow water (no lattice cell of
             the 2 km window around the spot is 1 km or more from land), where it stays 1.0.
-  checks    All stop the build: a triangle no water part's point reaches; a clockwise or zero-area triangle; a
+  checks    All stop the build: a triangle whose centre lies in a tile that was cut but in none of its cut
+            triangles, or in cut triangles of different labels; a clockwise or zero-area triangle; a
             neighbour link that is not mutual; a side shared by more than two triangles; a one-sided side that
             is not on an outline; a chart point that is not a corner; a chart line with no side on it; water
             area differing from the cut's; and every finished triangle's centre tested, exactly, against the
-            cut triangles: it must lie in water of the same label.
+            cut triangles: it must lie in water of the same label. Since the labels are now taken from that
+            same lookup, this last test repeats it and cannot disagree with it; the test that is independent
+            of the lookup is the water area.
 """
 import glob, json, math, os, struct, sys, time
 from fractions import Fraction as Fr
@@ -234,19 +242,17 @@ P = VIN * sc - C
 LINE_X = CT.DATE_LINE * sc[0]                # the date line in the mesh's x, and (LINE_P) as Triangle sees it
 LINE_P = CT.DATE_LINE * sc[0] - C[0]
 seg_on_line = CROSSES & (VIN[S[:, 0], 0] == CT.DATE_LINE) & (VIN[S[:, 1], 0] == CT.DATE_LINE)
-tin = {"vertices": P, "segments": S, "segment_markers": (np.arange(len(S)) + 2).reshape(-1, 1),
-       "regions": np.column_stack([SEEDS[:, :2] * sc - C, SEEDS[:, 2] + 1, np.zeros(len(SEEDS))])}
-if len(HOLES):
-    tin["holes"] = HOLES * sc - C
+tin = {"vertices": P, "segments": S, "segment_markers": (np.arange(len(S)) + 2).reshape(-1, 1)}
+log("well-shaping: Triangle is given the outline and the chart points only (no water-part points, no hole points)")
 log(f"mesh box lon {WEST} to {EAST}, lat {SOUTH} to {NORTH}; east-west scale {K:.9f}; corners in {n_in:,}; segments {len(S):,}")
 t0 = time.time()
 pid = os.fork()
 if pid == 0:
     import triangle
     try:
-        res = triangle.triangulate(tin, "pq20A")
+        res = triangle.triangulate(tin, "pq20")
         np.save(f"{work}/tri_v.npy", res["vertices"]); np.save(f"{work}/tri_t.npy", res["triangles"])
-        np.save(f"{work}/tri_a.npy", res["triangle_attributes"]); np.save(f"{work}/tri_s.npy", res["segments"])
+        np.save(f"{work}/tri_s.npy", res["segments"])
         np.save(f"{work}/tri_m.npy", res["segment_markers"])
         os._exit(0)
     except BaseException as ex:
@@ -257,9 +263,9 @@ if status != 0:
     fail(f"the well-shaping step stopped (status {status})")
 VR = np.load(f"{work}/tri_v.npy")
 T = np.load(f"{work}/tri_t.npy").astype(np.int64)
-TA = np.load(f"{work}/tri_a.npy").ravel().astype(np.int64) - 1
+TA = None
 SS = np.load(f"{work}/tri_s.npy").astype(np.int64); SM = np.load(f"{work}/tri_m.npy").ravel().astype(np.int64) - 2
-for f in ("tri_v", "tri_t", "tri_a", "tri_s", "tri_m"):
+for f in ("tri_v", "tri_t", "tri_s", "tri_m"):
     os.remove(f"{work}/{f}.npy")
 nT = len(T)
 log(f"well-shaping: {nT:,} triangles, {len(VR):,} corners in {time.time() - t0:.0f} s")
@@ -274,6 +280,80 @@ if CROSSES:
     on_line_v = SS[(SM >= 0) & seg_on_line[np.maximum(SM, 0)]].ravel()
     if (V[on_line_v, 0] != LINE_X).any():
         fail(f"{int((V[on_line_v, 0] != LINE_X).sum())} corners of sides on the date line are not on it")
+# ---- label every triangle from the cut by its centre, and keep the water
+_t0 = time.time()
+_cen = V[T].mean(axis=1) / sc
+
+
+def _tn(x, origin):
+    t = np.floor((x - origin) / TILE).astype(np.int64)
+    t -= x < origin + t * TILE
+    t += x >= origin + (t + 1) * TILE
+    return t
+
+
+_ti = _tn(_cen[:, 0], CT.ORIGIN_X); _tj = _tn(_cen[:, 1], CT.ORIGIN_Y)
+_tset = {(t[0], t[1]): t[2] for t in tiles}
+_tno = {(t[0], t[1]): n_ for n_, t in enumerate(tiles)}
+_key = _ti * 100000 + _tj
+_o = np.argsort(_key, kind="stable")
+_b = np.flatnonzero(np.r_[True, _key[_o][1:] != _key[_o][:-1]])
+_groups = {(int(_ti[_o[s_]]), int(_tj[_o[s_]])): _o[s_:e_] for s_, e_ in zip(_b, np.r_[_b[1:], len(_o)])}
+
+
+def _label_job(k_):
+    """Per triangle filed under tile k_: the cut's label at its centre (-1 not water; -2 in a tile that was
+    cut, but in none of its cut triangles; -3 in cut triangles of different labels; -4 in a tile no chart
+    reaches, which has no cut: not charted, so not in the mesh)."""
+    g = _groups[k_]
+    if k_ not in _tset:
+        return k_, np.full(len(g), -4, dtype=np.int64)
+    z = np.load(_tset[k_])
+    cv, ct, cl = shifted(z["CV"], _tset[k_]), z["CT"], z["CL"]
+    want = lab_inv[lab_off[_tno[k_]] + np.maximum(cl, 0)]
+    want = np.where(cl >= 0, want, -1)
+    pts = _cen[g]
+    pi, tq = shapely.STRtree(shapely.polygons(cv[ct])).query(shapely.points(pts), predicate="intersects")
+    A_, B_, C_ = cv[ct[tq, 0]], cv[ct[tq, 1]], cv[ct[tq, 2]]
+    Pp = pts[pi]
+
+    def orient(a, b, p):
+        d = (b[:, 0] - a[:, 0]) * (p[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (p[:, 0] - a[:, 0])
+        err = 4e-16 * (np.abs((b[:, 0] - a[:, 0]) * (p[:, 1] - a[:, 1])) + np.abs((b[:, 1] - a[:, 1]) * (p[:, 0] - a[:, 0])))
+        return d, np.abs(d) <= err
+
+    def ex(ax, ay, bx, by, px, py):
+        return (Fr(bx) - Fr(ax)) * (Fr(py) - Fr(ay)) - (Fr(by) - Fr(ay)) * (Fr(px) - Fr(ax))
+    d1, u1 = orient(A_, B_, Pp); d2, u2 = orient(B_, C_, Pp); d3, u3 = orient(C_, A_, Pp)
+    inside = ((d1 >= 0) & (d2 >= 0) & (d3 >= 0)) | ((d1 <= 0) & (d2 <= 0) & (d3 <= 0))
+    for n_ in np.flatnonzero(u1 | u2 | u3):
+        s1 = ex(A_[n_, 0], A_[n_, 1], B_[n_, 0], B_[n_, 1], Pp[n_, 0], Pp[n_, 1])
+        s2 = ex(B_[n_, 0], B_[n_, 1], C_[n_, 0], C_[n_, 1], Pp[n_, 0], Pp[n_, 1])
+        s3 = ex(C_[n_, 0], C_[n_, 1], A_[n_, 0], A_[n_, 1], Pp[n_, 0], Pp[n_, 1])
+        inside[n_] = (s1 >= 0 and s2 >= 0 and s3 >= 0) or (s1 <= 0 and s2 <= 0 and s3 <= 0)
+    lab = np.full(len(g), -2, dtype=np.int64)
+    for i_, w_ in zip(pi[inside].tolist(), want[tq[inside]].tolist()):
+        lab[i_] = w_ if lab[i_] in (-2, w_) else -3
+    return k_, lab
+
+
+TA_ALL = np.full(len(T), -2, dtype=np.int64)
+from multiprocessing import get_context as _gc
+with _gc("fork").Pool(workers) as _pool:
+    for k_, lab_ in _pool.imap_unordered(_label_job, sorted(_groups), chunksize=1):
+        TA_ALL[_groups[k_]] = lab_
+_keep = TA_ALL >= 0
+log(f"labels: Triangle drew {len(T):,} triangles; looked up in the cut: water {int(_keep.sum()):,}, not water {int((TA_ALL == -1).sum()):,}, "
+    f"in a tile no chart reaches {int((TA_ALL == -4).sum()):,}, in a cut tile but in no cut triangle {int((TA_ALL == -2).sum()):,}, "
+    f"between two labels {int((TA_ALL == -3).sum()):,}; {time.time() - _t0:.0f} s")
+if (TA_ALL == -3).any():
+    fail("a triangle's centre lies in cut triangles of different labels")
+if (TA_ALL == -2).any():
+    _b0 = int(np.flatnonzero(TA_ALL == -2)[0])
+    fail(f"{int((TA_ALL == -2).sum()):,} triangles have their centre in a tile that was cut but in none of its cut triangles; "
+         f"the first at lat {_cen[_b0, 1] / U7:.7f}, lon {_cen[_b0, 0] / U7:.7f}")
+T = T[_keep]; TA = TA_ALL[_keep]; nT = len(T)
+if CROSSES:
     tx = V[T][:, :, 0]
     if ((tx.min(axis=1) < LINE_X) & (tx.max(axis=1) > LINE_X)).any():
         bad = np.flatnonzero((tx.min(axis=1) < LINE_X) & (tx.max(axis=1) > LINE_X))

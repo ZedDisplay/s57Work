@@ -2,10 +2,11 @@
 
 - **Mesh build from source cells: what is still owed** (2026-11-24). The
   build in `mesh/` was replaced (CHANGELOG, `docs/MESH.md`). Owed:
-  1. `.github/workflows/build-mesh.yml` is rewritten (cells job per
-     district with `s57-to-mbtiles.py --cells-only`, then the build) and
-     has never run: a test run (`publish: test`) is owed, which also shows
-     whether the cutter compiles with the CGAL Ubuntu installs.
+  1. `.github/workflows/build-mesh.yml` is rewritten (each build job
+     downloads its own district's zip from NOAA and `build-mesh.py`
+     reads it) and has never run: a test run (`publish: test`) is owed,
+     which also shows whether the cutter compiles with the CGAL Ubuntu
+     installs.
   2. The router (signalk-weather-router-plus) reads `WRPMESH1` only.
      Nothing in the new format may be published under the existing names
      before the router reads `WRPMESH2`.

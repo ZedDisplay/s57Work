@@ -10,12 +10,17 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 - Navigation mesh: built from the chart source cells, cut exactly, in
   place of the build from the chart tiles (`build-mesh.py`, `mesh/`;
-  `docs/MESH.md`). `build-mesh.py CELLS [MORE_CELLS ...] --name NAME`
-  reads the per-cell GeoJSON the chart build exports, in units of 1e-7
-  degree, and cuts every tile with `mesh/exact_cut.cpp` (CGAL's exact
-  kernel; needs a C++ compiler with CGAL, GMP and MPFR). Only charted
-  water is in the mesh; the most detailed chart wins spot by spot,
-  whichever district it is filed under; chart lines are marked triangle
+  `docs/MESH.md`). `build-mesh.py CHARTS [...] --name NAME` reads the
+  district's chart zip itself (`mesh/cells.py`, with GDAL's `ogrinfo`
+  and `ogr2ogr`), and no other district's: one copy of each cell, the
+  latest issued; cancelled cells left out; the layers the mesh reads
+  extracted, in units of 1e-7 degree, into a new folder of the run's
+  own, so nothing is kept from one run to the next. It cuts every tile
+  with `mesh/exact_cut.cpp` (CGAL's exact kernel; needs a C++ compiler
+  with CGAL, GMP and MPFR). `s57-to-mbtiles.py`, the chart tile build,
+  is not used by the mesh build and is unchanged. Only charted
+  water is in the mesh; the most detailed of the district's charts wins
+  spot by spot; chart lines are marked triangle
   sides and chart points marked triangle corners (no strips, discs or
   reach); of two overlapping dredged or obstruction areas the shallower
   counts; no grid or snapping. Every check stops the build, including
@@ -28,20 +33,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   polygons, `check-mesh-land-mask.py`, the land fixture and the tests of
   the removed modules; `mapbox-vector-tile` and `pyshp` are no longer
   required. New tests: `tests/test_mesh_rules.py`,
-  `tests/test_mesh_build.py`; `tests/test_mesh_pipeline.py` and
+  `tests/test_mesh_cells.py`, `tests/test_mesh_build.py`,
+  `tests/test_mesh_dateline.py`; `tests/test_mesh_pipeline.py` and
   `tests/test_mesh_clearance.py` rewritten. `count-mesh-triangles.py`
-  reads both formats. `s57-to-mbtiles.py --by-band --cells-only` exports
-  every live cell of every band (band 6 included) into `data/cells/`,
-  emptied first, does all of its work in `data/cells-work/`, also emptied
-  first, so nothing of an earlier run is reused, and writes `data/cells/cells.json`, the list of them,
-  last and only when every cell exported completely (exit 1 and no list
-  otherwise); it needs no tippecanoe. That folder is the mesh build's
-  input: `build-mesh.py` reads the list and the files it names and
-  nothing else, and never the tile build's working folder.
-  `.github/workflows/build-mesh.yml` is rewritten for it (a `cells` job
-  per district, then the build on its own and every other district's
-  cells) and **has not yet been run; a release run would publish
-  `WRPMESH2` over the `WRPMESH1` meshes**.
+  reads both formats.
+  `.github/workflows/build-mesh.yml` is rewritten for it (each build job
+  downloads its own district's zip from NOAA and builds from it alone)
+  and **has not yet been run; a release
+  run would publish `WRPMESH2` over the `WRPMESH1` meshes**.
 
 ### Added
 - `mesh-catalog.py` writes and validates the mesh catalogue
@@ -96,30 +95,6 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rebuilds nothing. `.github/workflows/tests.yml` runs it on every push.
 
 ### Fixed
-- By-band: a cell given in more than one input (a district zip and the
-  state zips overlap; inputs downloaded on different days can hold
-  different editions) was two entries in the inventory, and both were
-  copied by file name into one band folder: one copy's base file next to
-  the other's update files. Measured on the zips on the developer's Mac
-  (01CGD of 2026-09-07, CT, MA, NY, RI of 2026-03-25): 626 cells in more
-  than one zip, 192 of them different. The inventory now holds one copy
-  of each cell, the latest issued (DSID ISDT after updates; not the
-  highest edition, since a cancellation has edition 0), chosen right
-  after staging (`one_copy_per_cell`, record in
-  `data/duplicate-cells.json`); copies issued the same day in different
-  states stop the run. A cell's band copy is now exactly its source
-  (`stage_band_cells`): update files left from an earlier copy go. The
-  CI builds take one zip per district and were not affected.
-- A band that grew from one cell to several in a reused `data/` folder
-  kept the first cell's plain `LAYER.geojson` files beside the new
-  `LAYER_CELL.geojson` ones, and consolidation merged the cell into each
-  layer a second time. A plain file in a folder whose inventory is not
-  exactly one cell is now removed with the other orphans
-  (`_remove_orphan_cells`). The CI builds start from an empty folder and
-  were not affected.
-- A cell's completion marker is removed before the cell is exported
-  again, not after its layers have been listed: a re-export that failed
-  at that first step left the marker of the earlier export standing.
 - Navigation mesh: open water whose finest chart is a coastal-band cell
   had no depth, hazard or sounding. The mesh build read the chart file's
   z16 tiles only, and the chart build renders band 3 to z14 and band 2 to

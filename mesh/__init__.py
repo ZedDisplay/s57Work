@@ -10,6 +10,10 @@ a mark, a sounding). It is written as flat binary tiles (magic
 
 Build (``build-mesh.py``, mesh/cli.py):
 
+0. ``cells``    - read the charts themselves (NOAA's zips of S-57 cells)
+                  with GDAL: one copy of each cell, the latest issued;
+                  cancelled cells left out; the layers the mesh reads
+                  extracted, in a folder that is the run's own.
 1. ``build``    - per 0.25-degree tile: read every chart cell that reaches
                   the tile, in the source's own whole numbers (units of
                   1e-7 degree); cut all of it exactly (exact_cut.cpp,

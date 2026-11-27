@@ -7,49 +7,61 @@ multiplier; per triangle side, the mark of a chart line lying on it; per
 triangle corner, the mark of a chart point there. It is what the
 signalk-weather-router-plus plugin routes motoring legs on.
 
-Since November 2026 the mesh is built from the chart source cells
-(S-57), cut exactly. The build it replaces read the finished chart
-tiles; the reasons it was replaced are at the end.
+Since November 2026 the mesh is built from the charts themselves, the
+S-57 source cells, cut exactly. `build-mesh.py` reads NOAA's chart zips
+itself; it uses nothing of the chart tile build (`s57-to-mbtiles.py`).
+The build it replaces read the finished chart tiles; the reasons it was
+replaced are at the end.
 
 **The tile format is `WRPMESH2`, index version 2. A router that reads
 only `WRPMESH1` (index version 1) cannot open these meshes.**
 
 ## Input
 
-One or more hand-over folders written by
-`s57-to-mbtiles.py --by-band --cells-only` (`data/cells`):
+The charts: NOAA's zips of S-57 cells (`01CGD_ENCs.zip`), or folders of
+them. A cell is `US<band>XXXXX.000` with its update files `.001`,
+`.002`, … beside it.
 
-- `bandN/LAYER_CELL.geojson` for every layer of every live cell of every
-  band (band 6 included), always named for its cell;
-- `cells.json`, the list: every cell with its band, its edition and its
-  files, the inputs it was exported from, and the cancelled cells that
-  were left out.
+A district's mesh is built from that district's charts and from nothing
+else: the arguments are its zip (several when its charts come in several
+files). The build makes every 0.25° tile their cells reach (the bounding
+box of each cell's skin-of-the-earth areas). No other district's charts
+are read, so each district's build stands by itself. Which cells belong
+to a district is NOAA's statement, not this build's: NOAA files a cell in
+the zip of every district it tags the cell with (an overview cell can
+belong to several: the Gulf overview `US1GLBCF` is tagged with districts
+5, 7 and 8 in NOAA's product catalogue, and is in each of their zips).
 
-The chart tool empties the folder before it exports, does all of the
-run's work (unpacking, the cells' band copies, reading their editions)
-in `data/cells-work`, which it also empties first, so nothing of an
-earlier run is read, and writes the list last, only when every cell
-exported completely; when a cell fails it
-exits 1 and there is no list. So the list exists only for a whole export
-and describes a folder that held nothing before it.
+Reading the charts is the build's first stage (`mesh/cells.py`), done
+with GDAL (`ogrinfo`, `ogr2ogr`, 3.7 or later), which applies a cell's
+update files to its base:
 
-The mesh build reads the list and the files it names, and nothing else:
-a file in the folder that is not on the list is never opened. A folder
-without a list, a list of a version this build does not read, a cell
-listed twice, a path that leaves the folder and a listed file that is
-not there each stop the build (`listed_cells` in `mesh/build.py`). The
-build does not read the chart tool's working folder (`data/geojson`),
-its completion markers or its error log.
+1. Each zip is unpacked into the run's folder. A folder is read where it
+   lies and is never written to.
+2. The cells are found. A `.000` file whose name is not a NOAA cell name
+   of bands 1 to 6 is not read; it is printed and recorded in the
+   sidecar.
+3. Each copy's edition, update number and issue date are read from the
+   cell itself (its DSID record, updates applied).
+4. **One copy of each cell** across the inputs: the latest issued (the
+   issue date, not the highest edition: a cancellation has edition 0 and
+   is the newest state). A copy whose issue date cannot be read, or two
+   copies issued the same day in different states, stop the build.
+5. **Cancelled cells** (edition 0 after updates, S-57 Appendix B.1 §5.7)
+   are left out and recorded.
+6. The layers the mesh reads (`LAYERS` in `mesh/build.py`) are extracted
+   from every live cell to GeoJSON, one file per layer.
+
+Nothing is kept from one run to the next: no cache, no marker, no list.
+Every run works in a new folder of its own, `<work>/run-XXXXXXXX`, so
+nothing of an earlier run can be read and nothing is emptied before a
+run. A cell GDAL cannot read, a layer that fails to extract, a cell
+without an edition number: each stops the build (exit 1) and names the
+cell. Nothing is downloaded by the build: the mesh is built from exactly
+the charts it is given.
 
 Coordinates are read in the source's own whole numbers, units of 1e-7
 degree, and stay in them until the mesh is written.
-
-The first folder is the district's own cells. The build makes every
-0.25° tile those cells reach (the bounding box of each cell's
-skin-of-the-earth areas). Any further folders hold other districts'
-cells; in the tiles being built every folder's cells are read, so the
-mesh holds all charted water of those tiles. A cell present in two
-folders is read from the first.
 
 ## What the mesh says
 
@@ -57,8 +69,8 @@ folders is read from the first.
   chart has a depth area, a dredged area or an unsurveyed area and no
   land. Land and uncharted space are not triangulated: a triangle side
   with no neighbour is the shore or the edge of the charts.
-- **The most detailed chart wins**, spot by spot, whichever district it
-  is filed under. A chart speaks where it has a skin-of-the-earth area
+- **The most detailed chart wins**, spot by spot, among the district's
+  own charts. A chart speaks where it has a skin-of-the-earth area
   (S-57 Group 1: `DEPARE`, `DRGARE`, `UNSARE`, `LNDARE`, `FLODOC`,
   `HULKES`, `PONTON`). Bands rank 6, 5, 4, 3, 2, 1. Within bands 1 and 2
   a new-scheme cell (region code `GLB`; `ARC`, `ANT`, `ATL`, `GRL`,
@@ -104,12 +116,16 @@ folders is read from the first.
 
 ## Stages and files
 
-Under the work directory (`data/mesh/<name>/`, `--work`):
+Each run makes its own folder, `run-XXXXXXXX`, under the work directory
+(`data/mesh/<name>/`, `--work`). It is removed after a build that passed
+(kept with `--keep-intermediate`) and kept, its path printed, after one
+that did not.
 
 | Stage | Module | Writes |
 |---|---|---|
 | cutter | `mesh/exact_cut.cpp` | `mesh/exact_cut`, compiled by the CLI when missing or older than its source |
-| tiles | `mesh/build.py` | `cell-index.json` (the cells read, from the lists), `tiles/tile_I_J.npz` (the cut of each tile), `tiles.json` (per-tile results) |
+| charts | `mesh/cells.py` | in the run's folder: `charts/inputN/` (each zip unpacked), `cells/<CELL>/<LAYER>.geojson` (the extracted layers) |
+| tiles | `mesh/build.py` | in the run's folder: `cell-index.json` (the cells read), `tiles/tile_I_J.npz` (the cut of each tile), `tiles.json` (per-tile results) |
 | second stage | `mesh/finalize.py` | `<out>/<name>_mesh/mesh_III_JJJ.bin` + `index.json` |
 | CLI | `mesh/cli.py` | `<out>/<name>_mesh.json`, `<out>/<name>_mesh.tar.zst` (`--archive`) |
 
@@ -179,6 +195,11 @@ gets the short box across the line, not the long one round the earth.
 
 Every check stops the build; there are no warnings that publish.
 
+Charts (exit 1): an input that is neither a zip nor a folder; no cell
+in the charts; a cell or a layer GDAL cannot read; a cell without an
+edition number; copies of a cell that cannot be decided between; a cell
+across the date line; no live cell with charted areas.
+
 Tile stage (exit 1): a tile whose cut fails or contradicts itself; a
 water part or hole too thin to hold a point (reported with its
 position); a chart point whose corner is not at the point's own
@@ -206,8 +227,10 @@ Second stage (exit 2):
 The share of triangles under 20° is printed and does not gate (sharp
 corners in the chart itself cannot be widened).
 
-Exit 0: built, every check passed, sidecar (and archive) written. On 1
-or 2 no sidecar is written.
+Exit 0: built, every check passed, sidecar (and archive) written; the
+sidecar is written last. On 1 or 2 no sidecar is written. The earlier
+result of the same name (mesh folder, sidecar, archive) is removed when
+a build starts, so after a build that failed there is none.
 
 ## Output
 
@@ -243,9 +266,10 @@ In the output directory (`-o`, default `data/tiles/`):
   122 bytes per triangle. Both triangles of a side carry its mark; every
   triangle at a corner carries the corner's mark.
 - `<name>_mesh.json`, the sidecar: `name`, `format`, `build_date`,
-  `build_seconds`, `builder_version`, `workers`, `cells` (per folder: its
-  role, when its list was written and from which inputs, the cells listed
-  and read by band, the cancelled cells its export left out),
+  `build_seconds`, `builder_version`, `workers`, `charts` (per input: its
+  file name, size, the cell files found and the `.000` files not read;
+  then the cells given more than once, the cancelled cells left out, the
+  live cells, and the cells read by band),
   `chart_build_date` and `chart_metadata` (from `--chart-json`),
   `tile_stage` (tiles, water, land and uncharted area, water without a
   depth, sides on chart lines, chart points as corners), `clusters` (one
@@ -257,41 +281,55 @@ In the output directory (`-o`, default `data/tiles/`):
 A district is one mesh with one rectangle and one `xScale`, also where
 its water lies far apart (07CGD: Florida and Puerto Rico in one mesh).
 
+A district's overview cells (bands 1 and 2) are among its charts, so its
+mesh reaches as far as they do: District 5's and District 7's meshes both
+hold the whole Gulf of Mexico from `US1GLBCF`, and two districts' meshes
+overlap wherever both districts' charts cover the same water, one perhaps
+in more detail than the other. Which of two installed meshes a router
+uses for water both cover is the router's matter, not this build's.
+
 ## Running locally
 
 ```bash
 pip install -r mesh/requirements.txt     # numpy scipy shapely triangle
+# GDAL 3.7 or later (ogrinfo, ogr2ogr; Homebrew: gdal; Ubuntu: gdal-bin)
 # a C++17 compiler with CGAL, GMP and MPFR (Homebrew: cgal; Ubuntu: libcgal-dev libgmp-dev libmpfr-dev)
-./s57-to-mbtiles.py 01CGD_ENCs.zip --by-band --cells-only              # the cells and their list, in data/cells (no tiles)
-./build-mesh.py data/cells /path/to/05CGD/cells --name 01CGD -o data/tiles -j 7 --archive
+./build-mesh.py 01CGD_ENCs.zip --name 01CGD -o data/tiles -j 7 --archive
 ```
 
 Every path given is resolved once (symbolic links followed) and checked
-once: the build removes `<work>/tiles` and `<out>/<name>_mesh`, and no
-folder it is given may be one of those or lie inside one.
+once. The build removes the earlier result of the same name
+(`<out>/<name>_mesh`, its sidecar and archive): nothing it is given may
+be one of those or lie inside the mesh folder, and a charts folder may
+not hold the mesh folder or the work directory.
 
-Options: `--name` (required), `-o`, `--work`, `-j/--workers`,
-`--chart-json FILE` (the published chart's metadata; its `build_date`
-becomes `chart_build_date`), `--archive`, `--keep-intermediate` (keep
-`<work>/tiles`, several GB for a district).
+Options: `--name` (required), `-o`, `--work`, `-j/--workers`, `--chart-json FILE` (the published chart's metadata; its
+`build_date` becomes `chart_build_date`), `--archive`,
+`--keep-intermediate` (keep the run's folder: the unpacked charts, the
+extracted layers and the cut of every tile, several GB for a district).
 
 ## Tests
 
 - `tests/test_mesh_clearance.py`: the clearance rule.
 - `tests/test_mesh_rules.py`: what a piece of water carries from the
-  shapes it lies in; the cell index (the list is the only source; order,
-  new scheme before legacy; a folder with no list, a listed file that is
-  missing and a list that cannot be read are refused).
-- `tests/test_mesh_build.py`: `build-mesh.py` on hand-made cells, read
-  back from the mesh files: only charted water, the most detailed chart
-  wins across folders, lines as marked sides over their whole length,
-  points as marked corners, soundings, the format, the sidecar. Needs
-  the mesh packages and CGAL.
-- `tests/test_mesh_pipeline.py`: `--cells-only` on the five-cell fixture
-  (the folder holds the list and what it names and nothing else), then
-  `build-mesh.py` on it; a cell that fails to export leaves no list and
-  the mesh build refuses the folder. Needs GDAL, the mesh packages and
-  CGAL.
+  shapes it lies in; the cell index (order, new scheme before legacy,
+  what is left out and refused); which tiles are built.
+- `tests/test_mesh_cells.py`: reading the charts, on the five-cell
+  fixture of real cells: one copy per cell (the latest issued), the
+  cancelled cell, what is extracted, a folder read in place, what cannot
+  be read. Needs GDAL and the mesh packages.
+- `tests/test_mesh_build.py` and `tests/test_mesh_dateline.py`: the mesh
+  of hand-made cells, read back from the mesh files: only charted water,
+  the most detailed chart wins, lines as marked sides over their whole
+  length, points as marked corners, soundings, the format, the date
+  line. Hand-made shapes cannot be written as S-57 cells, so these give
+  the build its cells as shapes and run everything after the reading,
+  through the same function `build-mesh.py` runs
+  (`tests/build_from_shapes.py`). Need the mesh packages and CGAL.
+- `tests/test_mesh_pipeline.py`: `build-mesh.py` on the fixture zip, end
+  to end; a district's charts in two files; charts that cannot be
+  read; two runs in the same folders with the zip changed in between;
+  the paths the build refuses. Needs GDAL, the mesh packages and CGAL.
 - `tests/test_mesh_catalog.py`: the catalogue writer.
 
 ## CI: `.github/workflows/build-mesh.yml`
@@ -308,28 +346,21 @@ the plan compares the published chart's `build_date`
 exists; `force` rebuilds regardless; a named `builds` list restricts the
 set; a test run always builds.
 
-- `cells`: one job per district of `mesh.active` (all of them, whichever
-  meshes are built), on `ubuntu-latest`: download NOAA's district zip,
-  `s57-to-mbtiles.py --by-band --cells-only` (the chart build's own first
-  stages: staging, cancelled cells, replacement cells; then the export of
-  every band into `data/cells` with its list; no tiles), and upload
-  `data/cells` as the artifact `cells-<D>` (kept one day).
-- `build`: one job per mesh on the runner named by `mesh.runner`, after
-  every `cells` job has succeeded: install CGAL, GMP, MPFR and the
-  packages, unpack every district's cells, fetch the chart's record, run
-  `build-mesh.py cells/<D>/cells <every other district's> --name <D>
-  --chart-json … --archive`, upload `<D>_mesh.tar.zst` and
-  `<D>_mesh.json`. A failed check fails the job and nothing of that
-  district is published. If any district's cells are missing the build
-  stops rather than build without them.
+- `build`: one job per mesh on the runner named by `mesh.runner`: install
+  GDAL, CGAL, GMP, MPFR and the packages, download that district's zip
+  from NOAA, fetch the published chart's record, run `build-mesh.py
+  <the district's zip> --name <D> --chart-json … --archive`, upload
+  `<D>_mesh.tar.zst` and `<D>_mesh.json`. Each district's job is
+  independent of the others. A failed check fails the job and nothing of
+  that district is published.
 - `release` and `test-stage` are as before: `<D>_mesh.tar.zst` and
   `<D>_mesh.json` to the `latest` release and R2 `charts/`, the unpacked
   folder to `charts/mesh/<D>/`, `charts/mesh/index.json` by
   `mesh-catalog.py`, the notes by `release-notes.sh`; a test run stages
   to `charts-test/<branch>/` and touches nothing published.
 
-The cells are exported from NOAA's zips at the time of the mesh run, so
-they can be newer than the cells the published chart was built from;
+The charts are NOAA's zips at the time of the mesh run, so their cells
+can be newer than the cells the published chart tiles were built from;
 `chart_build_date` records which chart build triggered the mesh.
 
 **A release run publishes `WRPMESH2` meshes under the existing names in

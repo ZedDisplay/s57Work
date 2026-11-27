@@ -1,11 +1,13 @@
-"""build-mesh.py on hand-made chart cells: what the mesh must say, read
-back from the mesh files. Needs the mesh packages and a C++ compiler
+"""The mesh build on hand-made chart cells: what the mesh must say, read
+back from the mesh files. The cells are given as shapes, in place of
+the charts build-mesh.py reads (tests/helpers.py build_from_shapes: the
+build after the reading, through the same function); the reading itself
+is tested on real cells in tests/test_mesh_pipeline.py and
+tests/test_mesh_cells.py. Needs the mesh packages and a C++ compiler
 with CGAL (the exact cutter); skips without.
 
-The cells (degrees; the tile edge at -71.5 runs through the water), each folder a hand-over folder with its
-cells.json:
+The cells (degrees; the tile edge at -71.5 runs through the water):
 
-  own folder
     US4XX1AA  band 4  depth area 10 m, -71.6..-71.4 x 41.05..41.20, with a
                       hole that is land (-71.58..-71.56 x 41.10..41.12);
                       an obstruction area of 2.5 m; two overlapping
@@ -15,17 +17,14 @@ cells.json:
                       of 4 m and 25 m; and a rock inside the band 5 cell
     US5XX1AB  band 5  depth area 3 m, -71.52..-71.48 x 41.08..41.12
                       (across the tile edge)
-    US5XX9ZZ  band 5  its file is in the folder and on no list
-  another district's folder
-    US5YY1AA  band 5  depth area 1.5 m inside the own band 4 water
-    US5YY1AB  band 5  far away, in a tile the own cells do not reach
+    US5XX1AC  band 5  depth area 1.5 m inside the band 4 water
 
 What is pinned:
   * the format: WRPMESH2 tiles of exactly the documented length, index
     version 2, the sidecar's fields, the archive;
   * only charted water is in the mesh: its area is the band 4 depth area
     less the land, and nothing lies outside it;
-  * the most detailed chart wins, whichever folder it is in: 3 m and 1.5 m
+  * the most detailed chart wins: 3 m and 1.5 m
     inside the band 5 cells, 10 m beside them; the band 4 rock inside the
     band 5 cell is not in the mesh;
   * of two dredged areas the shallower; an obstruction area lowers the
@@ -34,13 +33,11 @@ What is pinned:
     nowhere else; a chart point is a triangle corner at its own position,
     marked with what it is; a sounding is kept only where it is shallower
     than the depth area it lies in;
-  * a file that is in the folder and not on the list is not read, and the far cell is not in the mesh;
   * neighbour links are mutual and the multiplier is in range.
 """
 import json
 import shutil
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -97,8 +94,9 @@ def point(xy, props):
 
 
 def write_cells(base):
-    own, other = h.CellsFolder(Path(base) / "own"), h.CellsFolder(Path(base) / "other")
-    own.add("band4", "US4XX1AA", {
+    """The cells, a list of tests/helpers.py shapes_cell."""
+    folder = Path(base) / "shapes"
+    return [h.shapes_cell(folder, "band4", "US4XX1AA", {
         "DEPARE": [area(BOX, {"DRVAL1": 10.0, "DRVAL2": 20.0}, hole=ISLAND)],
         "LNDARE": [area(ISLAND, {})],
         "OBSTRN": [area(OBSTRUCTION, {"VALSOU": 2.5})],
@@ -110,12 +108,8 @@ def write_cells(base):
         "BOYLAT": [point(BUOY, {})],
         "LIGHTS": [point(LIGHT, {})],
         "SOUNDG": [point(SOUNDING_SHALLOW, {"DEPTH": 4.0}), point(SOUNDING_DEEP, {"DEPTH": 25.0})],
-    })
-    own.add("band5", "US5XX1AB", {"DEPARE": [area(FINE, {"DRVAL1": 3.0})]})
-    own.add("band5", "US5XX9ZZ", {"DEPARE": [area((-71.30, 41.05, -71.25, 41.10), {"DRVAL1": 0.5})]}, listed=False)
-    other.add("band5", "US5YY1AA", {"DEPARE": [area(OTHER_FINE, {"DRVAL1": 1.5})]})
-    other.add("band5", "US5YY1AB", {"DEPARE": [area((-70.05, 41.05, -70.0, 41.10), {"DRVAL1": 0.5})]})
-    return own.write(cancelled=["US5XX8ZZ"]), other.write()
+    }), h.shapes_cell(folder, "band5", "US5XX1AB", {"DEPARE": [area(FINE, {"DRVAL1": 3.0})]}),
+        h.shapes_cell(folder, "band5", "US5XX1AC", {"DEPARE": [area(OTHER_FINE, {"DRVAL1": 1.5})]})]
 
 
 def centre(b):
@@ -128,21 +122,16 @@ class HandMadeCells(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory(prefix="s57meshbuild-")
         base = Path(cls.tmp.name)
-        own, other = write_cells(base)
+        cells = write_cells(base)
         (base / "chart.json").write_text(json.dumps({"build_date": "2026-11-19T02:11:00Z"}))
         cls.out = base / "out"
         cls.work = base / "work"
-        # From another folder than the repository's: every path the build is given must work from anywhere.
-        cls.proc = subprocess.run(
-            [sys.executable, str(h.ROOT / "build-mesh.py"), own, other, "--name", "HAND", "-o", "out",
-             "--work", "work", "-j", "2", "--chart-json", "chart.json"],
-            cwd=base, capture_output=True, text=True)
+        cls.proc = h.build_from_shapes(base, "HAND", cells, chart_json=str(base / "chart.json"))
         if cls.proc.returncode != 0:
             raise AssertionError(f"build-mesh failed ({cls.proc.returncode}):\n"
                                  + cls.proc.stdout[-4000:] + cls.proc.stderr[-4000:])
         cls.m = h.read_mesh(cls.out / "HAND_mesh")
         cls.side = json.loads((cls.out / "HAND_mesh.json").read_text())
-        cls.own, cls.other = own, other
 
     @classmethod
     def tearDownClass(cls):
@@ -184,11 +173,7 @@ class HandMadeCells(unittest.TestCase):
         self.assertEqual(s["clusters"], [{"dir": ".", "box": [-71.75, 41.0, -71.25, 41.25],
                                           "x_scale": self.m["index"]["xScale"], "triangles": s["triangles"],
                                           "mesh_tiles": 2}])
-        own, other = s["cells"]
-        self.assertEqual((own["role"], own["cells"], own["cells_by_band"]), ("own", 2, {"band4": 1, "band5": 1}))
-        self.assertEqual((own["cells_listed"], own["list_written"], own["inputs"]), (2, "2026-11-24T00:00:00Z", ["TEST_ENCs.zip"]))
-        self.assertEqual(own["cancelled_cells_left_out"], ["US5XX8ZZ"], "as the folder's list records them")
-        self.assertEqual((other["role"], other["cells"]), ("other district", 2))
+        self.assertEqual(s["charts"], {"given": "shapes", "cells_read": 3}, "what the giver of the cells recorded")
 
     def test_the_catalogue_takes_the_sidecar(self):
         mc = h.mesh_catalog()
@@ -196,75 +181,21 @@ class HandMadeCells(unittest.TestCase):
         self.assertEqual(mc.validate_entry(e), [])
 
     def test_intermediates(self):
-        self.assertFalse((self.work / "tiles").exists(), "the cut is removed after a build that passed")
-        self.assertTrue((self.work / "tiles.json").exists())
+        self.assertEqual(list(self.work.iterdir()), [], "the run's folder is removed after a build that passed")
         self.assertFalse((self.out / "HAND_mesh.tar.zst").exists(), "no archive unless asked for")
 
     @unittest.skipUnless(shutil.which("tar") and shutil.which("zstd"), "needs tar and zstd")
     def test_archive(self):
         # a build of its own: the other tests must not depend on tar and zstd being installed
         with tempfile.TemporaryDirectory(prefix="s57mesharchive-") as tmp:
-            p = subprocess.run(
-                [sys.executable, str(h.ROOT / "build-mesh.py"), self.own, "--name", "ARC", "-o", str(Path(tmp) / "out"),
-                 "--work", str(Path(tmp) / "work"), "-j", "2", "--archive"], cwd=h.ROOT, capture_output=True, text=True)
+            p = h.build_from_shapes(tmp, "ARC", write_cells(tmp), archive=True, keep=True)
             self.assertEqual(p.returncode, 0, p.stdout[-2000:] + p.stderr[-2000:])
             listing = subprocess.run(["tar", "--zstd", "-tf", str(Path(tmp) / "out" / "ARC_mesh.tar.zst")],
                                      capture_output=True, text=True)
             self.assertEqual(listing.returncode, 0, listing.stderr)
             self.assertIn("ARC_mesh/index.json", listing.stdout)
-
-    def test_no_folder_given_may_be_inside_a_folder_the_build_removes(self):
-        # the build removes <work>/tiles and <out>/<name>_mesh; every path is resolved first, so a link is judged
-        # by where it points
-        with tempfile.TemporaryDirectory(prefix="s57meshpaths-") as tmp:
-            tmp = Path(tmp)
-            w, o = tmp / "w", tmp / "o"
-            (w / "tiles").mkdir(parents=True)
-            (o / "X_mesh").mkdir(parents=True)
-            (tmp / "elsewhere").mkdir()
-            link_out = tmp / "link-into-tiles"
-            link_out.symlink_to(w / "tiles", target_is_directory=True)
-            cells_in_tiles = w / "tiles" / "cells"
-            shutil.copytree(self.own, cells_in_tiles)
-            cells_in_mesh = o / "X_mesh" / "cells"
-            shutil.copytree(self.own, cells_in_mesh)
-            link_cells = tmp / "link-to-cells-in-tiles"
-            link_cells.symlink_to(cells_in_tiles, target_is_directory=True)
-            refused = [
-                ("the output directory", [self.own, "--work", str(w), "-o", str(w / "tiles" / "out")]),
-                ("the output directory", [self.own, "--work", str(w), "-o", str(link_out)]),
-                ("the cells folder", [str(cells_in_tiles), "--work", str(w), "-o", str(o)]),
-                ("the cells folder", [str(cells_in_mesh), "--work", str(w), "-o", str(o)]),
-                ("the cells folder", [str(link_cells), "--work", str(w), "-o", str(o)]),
-                ("the work directory", [self.own, "--work", str(o / "X_mesh" / "w"), "-o", str(o)]),
-            ]
-            for what, args in refused:
-                p = subprocess.run([sys.executable, str(h.ROOT / "build-mesh.py"), *args, "--name", "X"],
-                                   cwd=h.ROOT, capture_output=True, text=True)
-                self.assertEqual(p.returncode, 2, f"{args}: " + p.stdout[-500:] + p.stderr[-500:])
-                self.assertIn(what, p.stderr, args)
-                self.assertIn("the build removes that folder", p.stderr, args)
-            for kept in (cells_in_tiles, cells_in_mesh):
-                self.assertTrue((kept / "cells.json").exists(), "nothing was removed")
-
-    def test_paths_given_through_links_are_used_where_they_point(self):
-        # the output and the cells are symbolic links that sit inside <work>/tiles and point outside it: the
-        # build empties <work>/tiles (the links go with it) and still reads the cells and writes the mesh
-        with tempfile.TemporaryDirectory(prefix="s57meshlink-") as tmp:
-            tmp = Path(tmp)
-            real_out = tmp / "real-out"
-            real_out.mkdir()
-            (tmp / "w" / "tiles").mkdir(parents=True)
-            link_out = tmp / "w" / "tiles" / "out"
-            link_out.symlink_to(real_out, target_is_directory=True)
-            link_cells = tmp / "w" / "tiles" / "cells"
-            link_cells.symlink_to(self.own, target_is_directory=True)
-            p = subprocess.run(
-                [sys.executable, str(h.ROOT / "build-mesh.py"), str(link_cells), "--name", "LINK", "--work", str(tmp / "w"),
-                 "-o", str(link_out), "-j", "2"], cwd=h.ROOT, capture_output=True, text=True)
-            self.assertEqual(p.returncode, 0, p.stdout[-2000:] + p.stderr[-2000:])
-            self.assertTrue((real_out / "LINK_mesh" / "index.json").exists())
-            self.assertTrue((real_out / "LINK_mesh.json").exists())
+            run, = (Path(tmp) / "work").iterdir()
+            self.assertTrue(any((run / "tiles").glob("tile_*.npz")), "kept when asked for")
 
     # -- what is water -----------------------------------------------------
 
@@ -280,11 +211,6 @@ class HandMadeCells(unittest.TestCase):
         self.assertIsNone(h.mesh_triangle_at(self.m, *centre(ISLAND)), "land is not in the mesh")
         self.assertIsNone(h.mesh_triangle_at(self.m, *centre(PONTOON)), "a pontoon with no water area under it is not water")
 
-    def test_unlisted_and_far_cells_are_not_in_the_mesh(self):
-        self.assertTrue((Path(self.own) / "band5" / "DEPARE_US5XX9ZZ.geojson").exists(), "the file is in the folder")
-        self.assertIsNone(h.mesh_triangle_at(self.m, -71.275, 41.075), "and, being on no list, was not read")
-        self.assertIsNone(h.mesh_triangle_at(self.m, -70.025, 41.075))
-
     # -- depths ------------------------------------------------------------
 
     def test_most_detailed_chart_wins(self):
@@ -292,7 +218,7 @@ class HandMadeCells(unittest.TestCase):
         self.assertEqual(self.depth_at(*centre(FINE)), 3.0)
         self.assertEqual(self.depth_at(-71.51, 41.09), 3.0, "west of the tile edge")
         self.assertEqual(self.depth_at(-71.49, 41.11), 3.0, "east of the tile edge")
-        self.assertEqual(self.depth_at(*centre(OTHER_FINE)), 1.5, "a finer cell of another district's folder")
+        self.assertEqual(self.depth_at(*centre(OTHER_FINE)), 1.5, "a second band 5 cell")
 
     def test_two_dredged_areas_the_shallower(self):
         t7 = self.at(-71.585, 41.17)
@@ -415,16 +341,13 @@ class ChartLineOnATileEdge(unittest.TestCase):
     def test_the_line_is_kept_and_the_build_passes(self):
         cable = ((-71.5, 41.06), (-71.5, 41.08))
         with tempfile.TemporaryDirectory(prefix="s57meshedge-") as tmp:
-            own = h.CellsFolder(Path(tmp) / "own")
-            own.add("band5", "US5XX1AB", {
-                "DEPARE": [area((-71.6, 41.05, -71.5, 41.10), {"DRVAL1": 3.0})],
-                "CBLOHD": [line(cable, {"VERCLR": "9.5"})]})
-            own.add("band4", "US4XX1AA", {
-                "DEPARE": [area((-71.5, 41.05, -71.4, 41.10), {"DRVAL1": 10.0})]})
-            p = subprocess.run(
-                [sys.executable, str(h.ROOT / "build-mesh.py"), own.write(), "--name", "EDGE",
-                 "-o", str(Path(tmp) / "out"), "--work", str(Path(tmp) / "work"), "-j", "2"],
-                cwd=h.ROOT, capture_output=True, text=True)
+            folder = Path(tmp) / "shapes"
+            own = [h.shapes_cell(folder, "band5", "US5XX1AB", {
+                       "DEPARE": [area((-71.6, 41.05, -71.5, 41.10), {"DRVAL1": 3.0})],
+                       "CBLOHD": [line(cable, {"VERCLR": "9.5"})]}),
+                   h.shapes_cell(folder, "band4", "US4XX1AA", {
+                       "DEPARE": [area((-71.5, 41.05, -71.4, 41.10), {"DRVAL1": 10.0})]})]
+            p = h.build_from_shapes(tmp, "EDGE", own)
             self.assertEqual(p.returncode, 0, p.stdout[-3000:] + p.stderr[-3000:])
             self.assertIn("chart-line marks on tile edges joined from two differing records", p.stdout)
             m = h.read_mesh(Path(tmp) / "out" / "EDGE_mesh")

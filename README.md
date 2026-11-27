@@ -72,7 +72,7 @@ active:
 
 Finished `.mbtiles` files are uploaded as GitHub Release assets. Builds run automatically on the 1st of each month (April-November) or manually from the Actions tab.
 
-`build-mesh.py` builds a routing mesh of a district's charted water from the chart source cells this tool exports (see [docs/MESH.md](docs/MESH.md)). A second workflow, "Build Navigation Meshes", publishes the meshes beside the charts as `<district>_mesh.tar.zst` and `<district>_mesh.json`, unpacked at `charts/mesh/<district>/` on R2; the `mesh:` section of `enc-sources.yaml` lists the districts. That workflow was rewritten for the build from source cells and has not yet been run (docs/MESH.md, CI).
+`build-mesh.py` builds a routing mesh of a district's charted water from NOAA's chart zips, which it reads itself (see [docs/MESH.md](docs/MESH.md)). A second workflow, "Build Navigation Meshes", publishes the meshes beside the charts as `<district>_mesh.tar.zst` and `<district>_mesh.json`, unpacked at `charts/mesh/<district>/` on R2; the `mesh:` section of `enc-sources.yaml` lists the districts. That workflow was rewritten for the build from source cells and has not yet been run (docs/MESH.md, CI).
 
 ## Forking
 

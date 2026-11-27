@@ -12,15 +12,12 @@ state is inside: (layer, properties, rank, order). What is pinned:
     the depth alone;
   * land, structure, fairway, dredged, navigable, clearance, opening;
   * a state no chart speaks for is "no chart", nothing else;
-  * the cell index: the cells are those a folder's list (cells.json)
-    names, with the files it names, and nothing else in the folder; most
-    detailed band first, a new-scheme cell of band 1 or 2 before a legacy
-    cell of its band, a cell present in two folders read from the first;
-    a folder with no list, a listed file that is missing, and a list this
-    build cannot read are refused.
+  * the cell index: of the cells given, those with a skin-of-the-earth
+    area, most detailed band first, a new-scheme cell of band 1 or 2
+    before a legacy cell of its band; a cell of no chart band and a cell
+    across the date line are refused;
+  * which tiles are built: those the cells reach.
 """
-import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -114,92 +111,57 @@ def square(box=(0.0, 0.0, 1.0, 1.0)):
 
 @unittest.skipUnless(HAVE, "mesh packages not installed")
 class CellIndex(unittest.TestCase):
-    """The cells come from each folder's list (cells.json) and from nothing else in the folder."""
+    """Which of the cells given the tile stage reads, and in what order."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="s57cells-")
-        self.own = h.CellsFolder(Path(self.tmp.name) / "own")
-        self.other = h.CellsFolder(Path(self.tmp.name) / "other")
-        self.work = Path(self.tmp.name) / "work"
-        self.work.mkdir()
+        self.folder = Path(self.tmp.name)
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_order_and_first_folder(self):
-        self.own.add("band5", "US5XX1AA", {"DEPARE": square((0.0, 0.0, 0.5, 0.5))})
-        self.own.add("band4", "US4XX1AA", {"DEPARE": square()})
-        self.own.add("band2", "US2EC03M", {"DEPARE": square()})                  # legacy name
-        self.own.add("band2", "US2ATLPF", {"DEPARE": square()})                  # new scheme (ATL)
-        self.own.add("band3", "US3XX1AA", {"M_COVR": square()})   # no skin-of-the-earth area: not a chart that speaks
-        self.other.add("band5", "US5YY1AA", {"DEPARE": square()})
-        self.other.add("band4", "US4XX1AA", {"DEPARE": square((5.0, 5.0, 6.0, 6.0))})    # also in the first folder
-        a, b = self.own.write(), self.other.write()
-        cells = B.cell_index([a, b], str(self.work), 1)
+    def record(self, band, cell, layers, source="A.zip"):
+        """A record as mesh/cells.py gives it: (band, name, source, {layer: file})."""
+        band, cell, files = h.shapes_cell(self.folder, band, cell, layers)
+        return (band, cell, source, files)
+
+    def test_order_rank_and_what_is_left_out(self):
+        records = [
+            self.record("band5", "US5XX1AA", {"DEPARE": square((0.0, 0.0, 0.5, 0.5))}),
+            self.record("band4", "US4XX1AA", {"DEPARE": square()}),
+            self.record("band2", "US2EC03M", {"DEPARE": square()}),                  # legacy name
+            self.record("band2", "US2ATLPF", {"DEPARE": square()}),                  # new scheme (ATL)
+            self.record("band3", "US3XX1AA", {"M_COVR": square()}),   # no skin-of-the-earth area: not a chart that speaks
+            self.record("band5", "US5YY1AA", {"DEPARE": square()}, source="B.zip"),
+        ]
+        cells = B.cell_index(records, 1)
         self.assertEqual([c[2] for c in cells], ["US5XX1AA", "US5YY1AA", "US4XX1AA", "US2ATLPF", "US2EC03M"])
         ranks = {c[2]: c[0] for c in cells}
-        self.assertEqual(ranks["US5XX1AA"], ranks["US5YY1AA"], "one band, one rank, whichever folder")
+        self.assertEqual(ranks["US5XX1AA"], ranks["US5YY1AA"], "one band, one rank, whichever input")
         self.assertLess(ranks["US2ATLPF"], ranks["US2EC03M"], "new scheme wins within band 2")
         own4 = next(c for c in cells if c[2] == "US4XX1AA")
-        self.assertEqual((own4[3], own4[4], own4[5]), (a, [0.0, 0.0, 1.0, 1.0], True), "read from the first folder")
-        self.assertEqual({c[2]: c[5] for c in cells}["US5YY1AA"], False)
+        self.assertEqual((own4[3], own4[4]), ("A.zip", [0.0, 0.0, 1.0, 1.0]))
+        self.assertEqual({c[2]: c[3] for c in cells}["US5YY1AA"], "B.zip")
         self.assertEqual(next(c for c in cells if c[2] == "US5XX1AA")[4], [0.0, 0.0, 0.5, 0.5])
-        self.assertEqual(own4[6], {"DEPARE": os.path.realpath(Path(a) / "band4" / "DEPARE_US4XX1AA.geojson")},
-                         "the files the list names, where they really are")
+        self.assertEqual(own4[5], records[1][3], "the files given")
 
-    def test_a_folder_without_a_list_is_refused(self):
-        self.own.add("band5", "US5XX1AA", {"DEPARE": square()})        # the files are there, the list is not
-        with self.assertRaises(RuntimeError) as cm:
-            B.listed_cells(str(self.own.path))
-        self.assertIn("no cells.json", str(cm.exception))
-        self.assertIn("did not finish", str(cm.exception))
-
-    def test_what_is_not_on_the_list_is_not_read(self):
-        self.own.add("band5", "US5XX1AA", {"DEPARE": square()})
-        self.own.add("band5", "US5XX1AB", {"DEPARE": square()}, listed=False)
-        root = self.own.write()
-        (Path(root) / "band5" / "DEPARE.geojson").write_text("not even JSON")       # a stray file
-        (Path(root) / "band4").mkdir()
-        (Path(root) / "band4" / "DEPARE_US4XX1AA.geojson").write_text("not even JSON")
-        self.assertEqual([c[1] for c in B.listed_cells(root)], ["US5XX1AA"])
-        self.assertEqual([c[2] for c in B.cell_index([root], str(self.work), 1)], ["US5XX1AA"])
-
-    def test_a_listed_file_that_is_missing_stops_the_build(self):
-        self.own.add("band5", "US5XX1AA", {"DEPARE": square(), "SOUNDG": []})
-        root = self.own.write()
-        (Path(root) / "band5" / "SOUNDG_US5XX1AA.geojson").unlink()
-        with self.assertRaises(RuntimeError) as cm:
-            B.listed_cells(root)
-        self.assertIn("SOUNDG_US5XX1AA.geojson, which is not there", str(cm.exception))
-
-    def test_a_listed_file_that_is_a_link_out_of_the_folder_is_refused(self):
-        # judged by where the file really is, not by how its path reads
-        self.own.add("band5", "US5XX1AA", {"DEPARE": square()})
-        root = self.own.write()
-        outside = Path(self.tmp.name) / "outside.geojson"
-        outside.write_text(json.dumps({"type": "FeatureCollection", "features": square()}))
-        listed = Path(root) / "band5" / "DEPARE_US5XX1AA.geojson"
-        listed.unlink()
-        listed.symlink_to(outside)
-        with self.assertRaises(RuntimeError) as cm:
-            B.listed_cells(root)
-        self.assertIn("which is not inside the folder", str(cm.exception))
-
-    def test_a_list_this_build_cannot_read_is_refused(self):
-        self.own.add("band5", "US5XX1AA", {"DEPARE": square()})
-        root = self.own.write()
-        doc = json.loads((Path(root) / "cells.json").read_text())
-        for change, said in (({"version": 2}, "list version 2"),
-                             ({"cells": doc["cells"] * 2}, "listed twice"),
-                             ({"cells": [dict(doc["cells"][0], band=7)]}, "not a chart band"),
-                             ({"cells": [dict(doc["cells"][0], files={"DEPARE": "../elsewhere/DEPARE_US5XX1AA.geojson"})]},
-                              "not inside the folder"),
-                             ({"cells": [dict(doc["cells"][0], files={"DEPARE": str(Path(root) / "band5" / "DEPARE_US5XX1AA.geojson")})]},
-                              "not inside the folder")):
-            (Path(root) / "cells.json").write_text(json.dumps(dict(doc, **change)))
+    def test_a_cell_this_build_does_not_read_is_refused(self):
+        for band, cell, box, said in (("band7", "US7XX1AA", (0.0, 0.0, 1.0, 1.0), "is not a chart band"),
+                                      ("band4", "US4XX1AB", (179.0, 0.0, 181.0, 1.0), "beyond 180 degrees"),
+                                      ("band4", "US4XX1AC", (-170.0, 0.0, 170.0, 1.0), "across the date line")):
             with self.assertRaises(RuntimeError) as cm:
-                B.listed_cells(root)
+                B.cell_index([self.record(band, cell, {"DEPARE": square(box)})], 1)
             self.assertIn(said, str(cm.exception))
+            self.assertIn(cell, str(cm.exception))
+
+    def test_the_tiles_built_are_those_the_cells_reach(self):
+        cells = B.cell_index([self.record("band4", "US4XX1AA", {"DEPARE": square((-71.6, 41.05, -71.4, 41.2))}),
+                              self.record("band5", "US5XX1AB", {"DEPARE": square((-70.05, 41.05, -70.01, 41.1))}),
+                              self.record("band5", "US5XX1AC", {"DEPARE": square((-69.2, 41.05, -69.0, 41.1))})], 1)
+        # columns count from -180, rows from -90, in quarter degrees. The first cell lies across the tile edge at
+        # -71.5 (tiles 433 and 434); the second inside -70.25..-70.0 (439); the third ends exactly on the tile edge
+        # at -69.0, and a cell that touches a tile's edge reaches that tile too (443 and 444).
+        self.assertEqual(B.tiles_reached(cells), [(433, 524), (434, 524), (439, 524), (443, 524), (444, 524)])
 
 
 if __name__ == "__main__":

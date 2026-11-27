@@ -1,7 +1,8 @@
 name: Build Navigation Meshes
 
-# Builds the routing mesh of each district from its chart source cells
-# (build-mesh.py, see docs/MESH.md) and publishes it beside the charts: <D>_mesh.tar.zst
+# Builds the routing mesh of each district from NOAA's charts themselves
+# (build-mesh.py reads the district zips of S-57 cells, see docs/MESH.md)
+# and publishes it beside the charts: <D>_mesh.tar.zst
 # and <D>_mesh.json on the 'latest' release and R2 charts/, the unpacked
 # folder at R2 charts/mesh/<D>/ (a plain mirror of it is a valid plugin
 # meshDir), and charts/mesh/index.json listing every mesh.
@@ -52,8 +53,6 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       names: ${{ steps.plan.outputs.names }}
-      cells: ${{ steps.plan.outputs.cells }}
-      cell_districts: ${{ steps.plan.outputs.cell_districts }}
       publish: ${{ steps.mode.outputs.publish }}
     steps:
       - uses: actions/checkout@v7
@@ -183,100 +182,27 @@ jobs:
                   "district": district,
                   "prefix": prefix,
                   "stem": stem,
+                  # NOAA's zip(s) of this district's charts: what its mesh is built from, and nothing else.
+                  "urls": [f"{config['base_url']}/{s}" for s in b["sources"]],
                   "runner": runner,
                   "workers": workers,
               })
               names.append(f"mesh-{district}")
               lines.append(f"- {name}: build ({reason}; chart from {prefix}/, {chart_date})")
 
-          # The cells every mesh is built from: each district's own, and
-          # every other district's of the mesh.active list (the most
-          # detailed chart wins whichever district it is filed under, and a
-          # district's coarse cells reach into its neighbours' water). One
-          # export job per district, whichever districts are built.
-          cells, seen = [], set()
-          for name in list(mesh_cfg.get("active", [])) + [m["name"] for m in matrix]:
-              b = config["builds"].get(name)
-              if not b or name in seen:
-                  continue
-              seen.add(name)
-              stem = b["sources"][0].rsplit(".", 1)[0]
-              cells.append({
-                  "name": name,
-                  "district": stem[:-5] if stem.endswith("_ENCs") else stem,
-                  "urls": [f"{config['base_url']}/{s}" for s in b["sources"]],
-                  "files": b["sources"],
-              })
-
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"matrix={json.dumps(matrix)}\n")
               f.write(f"names={json.dumps(names)}\n")
-              f.write(f"cells={json.dumps(cells if matrix else [])}\n")
-              f.write(f"cell_districts={' '.join(c['district'] for c in cells)}\n")
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
               f.write("### Mesh plan\n\n" + ("\n".join(lines) if lines else "- nothing to build") + "\n")
           print("\n".join(lines) if lines else "nothing to build")
 
-  # ── Step 2: export each district's chart cells ──────────────────────
-  # The mesh is built from the chart source cells (docs/MESH.md), not from
-  # the chart tiles: s57-to-mbtiles.py --cells-only runs the chart build's
-  # own first stages (stage, drop cancelled cells, fetch replacement cells)
-  # on NOAA's district zip and exports every cell into data/cells, with
-  # data/cells/cells.json, the list of them, written last and only when
-  # every cell exported completely (it exits 1 otherwise).
-  cells:
-    needs: prepare
-    if: needs.prepare.outputs.publish != 'skip' && needs.prepare.outputs.cells != '[]'
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        district: ${{ fromJson(needs.prepare.outputs.cells) }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install GDAL
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq gdal-bin zstd
-          ogr2ogr --version
-
-      - name: Download ENC sources
-        run: |
-          mkdir -p downloads
-          for url in ${{ join(matrix.district.urls, ' ') }}; do
-            filename=$(basename "$url")
-            curl -fSL --retry 3 --retry-delay 5 -o "downloads/$filename" "$url"
-            ls -lh "downloads/$filename"
-          done
-
-      - name: Export the cells
-        env:
-          DISTRICT: ${{ matrix.district.district }}
-        run: |
-          inputs=""
-          for f in ${{ join(matrix.district.files, ' ') }}; do
-            inputs="$inputs downloads/$f"
-          done
-          python3 s57-to-mbtiles.py $inputs --by-band --cells-only -j 4
-          # The hand-over folder: the cells and their list, nothing else.
-          tar --zstd -cf "cells-$DISTRICT.tar.zst" -C data cells
-          ls -lh "cells-$DISTRICT.tar.zst"
-
-      - name: Upload the cells
-        uses: actions/upload-artifact@v7
-        with:
-          name: cells-${{ matrix.district.district }}
-          path: cells-${{ matrix.district.district }}.tar.zst
-          retention-days: 1
-          if-no-files-found: error
-
-  # ── Step 3: build each mesh ──────────────────────────────────────────
-  # Needs every cells job: a mesh built without a neighbour's cells would
-  # describe the neighbour's water from this district's coarse cells.
+  # ── Step 2: build each mesh ──────────────────────────────────────────
+  # Each mesh is built from its own district's charts and from nothing
+  # else: NOAA's zip of S-57 cells, which build-mesh.py reads itself
+  # (docs/MESH.md).
   build:
-    needs: [prepare, cells]
+    needs: prepare
     if: needs.prepare.outputs.publish != 'skip' && needs.prepare.outputs.matrix != '[]'
     runs-on: ${{ matrix.district.runner }}
     timeout-minutes: 360
@@ -294,36 +220,25 @@ jobs:
           cache: pip
           cache-dependency-path: mesh/requirements.txt
 
-      # CGAL, GMP and MPFR: build-mesh.py compiles mesh/exact_cut.cpp.
+      # GDAL: build-mesh.py reads the charts with ogrinfo and ogr2ogr.
+      # CGAL, GMP and MPFR: it compiles mesh/exact_cut.cpp.
       - name: Install the mesh build's packages
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential libcgal-dev libgmp-dev libmpfr-dev zstd
+          sudo apt-get install -y -qq gdal-bin build-essential libcgal-dev libgmp-dev libmpfr-dev zstd
           pip install -r mesh/requirements.txt
           python3 -c "import numpy, scipy, shapely, triangle; print('shapely', shapely.__version__, 'numpy', numpy.__version__)"
+          ogrinfo --version
           zstd --version
 
-      - name: Download every district's cells
-        uses: actions/download-artifact@v8
-        with:
-          pattern: cells-*
-          path: cells-art
-          merge-multiple: true
-
-      - name: Unpack the cells
-        env:
-          EXPECTED: ${{ needs.prepare.outputs.cell_districts }}
+      - name: Download the district's charts from NOAA
         run: |
-          for d in $EXPECTED; do
-            if [ ! -f "cells-art/cells-$d.tar.zst" ]; then
-              echo "::error::no cells for $d: its export job did not deliver"
-              exit 1
-            fi
-            mkdir -p "cells/$d"
-            tar --zstd -xf "cells-art/cells-$d.tar.zst" -C "cells/$d"
-            rm "cells-art/cells-$d.tar.zst"
+          mkdir -p charts
+          for url in ${{ join(matrix.district.urls, ' ') }}; do
+            filename=$(basename "$url")
+            curl -fSL --retry 3 --retry-delay 5 -o "charts/$filename" "$url"
+            ls -lh "charts/$filename"
           done
-          du -sh cells/*
 
       # Only the chart's record: its build_date goes into the mesh sidecar
       # as chart_build_date, which the next run's plan compares.
@@ -339,26 +254,20 @@ jobs:
           case "$BUCKET" in
             */*) PUB="$PUB/${BUCKET#*/}" ;;
           esac
-          mkdir -p chart
-          curl -fSL --retry 3 --retry-delay 10 -A s57Work-build-mesh -o "chart/$STEM.json" "$PUB/$PREFIX/$STEM.json"
-          python3 -c "import json,os; m=json.load(open('chart/%s.json' % os.environ['STEM'])); print('chart build_date', m.get('build_date'))"
+          mkdir -p chart-record
+          curl -fSL --retry 3 --retry-delay 10 -A s57Work-build-mesh -o "chart-record/$STEM.json" "$PUB/$PREFIX/$STEM.json"
+          python3 -c "import json,os; m=json.load(open('chart-record/%s.json' % os.environ['STEM'])); print('chart build_date', m.get('build_date'))"
 
       - name: Build the mesh
         env:
           DISTRICT: ${{ matrix.district.district }}
           STEM: ${{ matrix.district.stem }}
           WORKERS: ${{ matrix.district.workers }}
-          EXPECTED: ${{ needs.prepare.outputs.cell_districts }}
         run: |
-          # The district's own cells first, then every other district's.
-          others=""
-          for d in $EXPECTED; do
-            [ "$d" = "$DISTRICT" ] || others="$others cells/$d/cells"
-          done
           set +e
-          python3 build-mesh.py "cells/$DISTRICT/cells" $others \
+          python3 build-mesh.py charts/*.zip \
             --name "$DISTRICT" \
-            --chart-json "chart/$STEM.json" \
+            --chart-json "chart-record/$STEM.json" \
             -o out -j "$WORKERS" --archive
           rc=$?
           set -e
@@ -373,11 +282,13 @@ jobs:
           print(f"- every check passed; triangles {s['triangles']:,} in {s['mesh_tiles']} tiles, {s['bytes']/1e6:.0f} MB raw, built in {s['build_seconds']/60:.0f} min")
           print(f"- box {s['clusters'][0]['box']}")
           print(f"- water {t['water_km2']:,.0f} km2, of it without a depth {t['water_without_depth_km2']:,.1f} km2; sides on chart lines {t['sides_on_chart_lines']:,}; chart points as corners {t['chart_points_as_corners']:,}")
-          for c in s["cells"]:
-              print(f"- cells ({c['role']}) {os.path.basename(os.path.dirname(c['folder']))}: listed {c['cells_listed']} ({c['list_written']}), read {c['cells']} {c['cells_by_band']}, cancelled left out {len(c['cancelled_cells_left_out'])}")
+          c = s["charts"]
+          for i in c["inputs"]:
+              print(f"- charts {i['file']}: {i['cell_files_found']} cell files")
+          print(f"- cells: live {c['live_cells']}, read {c['cells_read']} {c['cells_read_by_band']}, cancelled left out {len(c['cancelled_cells_left_out'])}, given more than once {c['cells_given_more_than_once']}")
           EOF
             else
-              echo "- no sidecar: the build stopped (exit status $rc; 1 tile stage, 2 a check of the second stage); see the log"
+              echo "- no sidecar: the build stopped (exit status $rc; 1 the charts or the tile stage, 2 a check of the second stage); see the log"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
           ls -lh out/ || true
@@ -393,7 +304,7 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  # ── Step 4: publish ──────────────────────────────────────────────────
+  # ── Step 3: publish ──────────────────────────────────────────────────
   # One artifact at a time, so the runner's disk holds it (an unpacked
   # District 1 mesh is about 3 GB).
   release:
