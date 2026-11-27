@@ -45,5 +45,5 @@ if [ -n "$meshes" ]; then
   echo
   echo "$meshes"
   echo
-  echo "Routing mesh of each district's charted water (triangles with depth, clearance, hazard and mark labels; format \`WRPMESH1\`), built from the published chart by \`build-mesh.py\`. Unpack the archive and point a router at the folder, or mirror the unpacked folder from \`$PUB/charts/mesh/<district>/\`. Provenance and build checks: same URLs with \`_mesh.json\`; every mesh is listed in \`$PUB/charts/mesh/index.json\`."
+  echo "Routing mesh of each district's charted water (triangles with depth, clearance and hazard values, chart lines as marked sides, chart points as marked corners; the tile format is named in each mesh's \`_mesh.json\`), built from the chart source cells by \`build-mesh.py\`. Before replacing a mesh that works, check that your router reads the format its \`_mesh.json\` names: a router that reads only \`WRPMESH1\` cannot open a \`WRPMESH2\` mesh. Unpack the archive and point a router at the folder, or mirror the unpacked folder from \`$PUB/charts/mesh/<district>/\`. Provenance and build checks: same URLs with \`_mesh.json\`; every mesh is listed in \`$PUB/charts/mesh/index.json\`."
 fi

@@ -15,7 +15,7 @@ PUB = "https://example.test/US-ENC/charts"
 
 def sidecar(name="01CGD", **over):
     s = {"name": name, "build_date": "2026-10-16T05:57:08Z", "chart_build_date": "2026-10-16T00:56:10Z",
-         "format": {"magic": "WRPMESH1", "index_version": 1, "tile_deg": 0.25, "multi_cluster": False},
+         "format": {"magic": "WRPMESH2", "index_version": 2, "tile_deg": 0.25, "multi_cluster": False},
          "triangles": 42329633, "bytes": 3386387856,
          "clusters": [{"dir": ".", "box": [-74.749875, 39.750125, -65.749875, 45.750125]}]}
     s.update(over)
@@ -44,12 +44,19 @@ class Entry(unittest.TestCase):
             ({"clusters": []}, "clusters"),
             ({"clusters": [{"dir": ".", "box": [1, 2, 3]}]}, "clusters[0].box"),
             ({"clusters": [{"dir": ".", "box": [1, 2, float("nan"), 4]}]}, "clusters[0].box"),
-            ({"clusters": [{"dir": ".", "box": [3, 2, 1, 4]}]}, "clusters[0].box"),
+            ({"clusters": [{"dir": ".", "box": [1, 4, 3, 2]}]}, "clusters[0].box"),
+            ({"clusters": [{"dir": ".", "box": [1, 2, 1, 4]}]}, "clusters[0].box"),
+            ({"clusters": [{"dir": ".", "box": [180, 10, -180, 11]}]}, "clusters[0].box"),
+            ({"clusters": [{"dir": ".", "box": [165.5, 38.25, 230.5, 81.75]}]}, "clusters[0].box"),
         ]
         for over, field in cases:
             e = mc.entry_from_sidecar(sidecar(**over), PUB)
             bad = mc.validate_entry(e)
             self.assertTrue(any(b.startswith(field) for b in bad), (over, bad))
+
+    def test_a_box_across_the_date_line_has_west_greater_than_east(self):
+        e = mc.entry_from_sidecar(sidecar(clusters=[{"dir": ".", "box": [165.5, 38.25, -129.5, 81.75]}]), PUB)
+        self.assertEqual(mc.validate_entry(e), [])
 
     def test_chart_build_date_may_be_null(self):
         e = mc.entry_from_sidecar(sidecar(chart_build_date=None), PUB)

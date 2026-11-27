@@ -4,7 +4,7 @@ data/enc/*
 data/geojson/*
 data/merged/*
 data/tiles/*
-# Mesh build work directory (z16 pickles, tile/mesh .npz, logs)
+# Mesh build work directory (a folder per run: unpacked charts, extracted layers, the cut of every tile)
 data/mesh/*
 # Bathymetry pilot work directory (venv, downloads, composites; code on branch a-world-apart)
 data/bathy/*
@@ -16,6 +16,9 @@ data/*.mbtiles
 
 # CI downloads
 downloads/
+
+# The exact cutter, compiled from mesh/exact_cut.cpp by build-mesh.py
+mesh/exact_cut
 
 # Python
 __pycache__/

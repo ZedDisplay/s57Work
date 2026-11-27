@@ -7,6 +7,41 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- Navigation mesh: built from the chart source cells, cut exactly, in
+  place of the build from the chart tiles (`build-mesh.py`, `mesh/`;
+  `docs/MESH.md`). `build-mesh.py CHARTS [...] --name NAME` reads the
+  district's chart zip itself (`mesh/cells.py`, with GDAL's `ogrinfo`
+  and `ogr2ogr`), and no other district's: one copy of each cell, the
+  latest issued; cancelled cells left out; the layers the mesh reads
+  extracted, in units of 1e-7 degree, into a new folder of the run's
+  own, so nothing is kept from one run to the next. It cuts every tile
+  with `mesh/exact_cut.cpp` (CGAL's exact kernel; needs a C++ compiler
+  with CGAL, GMP and MPFR). `s57-to-mbtiles.py`, the chart tile build,
+  is not used by the mesh build and is unchanged. Only charted
+  water is in the mesh; the most detailed of the district's charts wins
+  spot by spot; chart lines are marked triangle
+  sides and chart points marked triangle corners (no strips, discs or
+  reach); of two overlapping dredged or obstruction areas the shallower
+  counts; no grid or snapping. Every check stops the build, including
+  every finished triangle tested exactly against the cut. **The tile
+  format is `WRPMESH2`, index version 2, with new per-side and
+  per-corner fields; a reader of `WRPMESH1` cannot open it.** Removed:
+  `mesh/decode.py`, `mesh/extent.py`, `mesh/binary.py`, the options
+  `--land`, `--catalog`, `--no-catalog`, `--box`, `--snap-discs`,
+  `--debug-point`, `--reuse-decoded`, `--allow-fail`, the OSM land
+  polygons, `check-mesh-land-mask.py`, the land fixture and the tests of
+  the removed modules; `mapbox-vector-tile` and `pyshp` are no longer
+  required. New tests: `tests/test_mesh_rules.py`,
+  `tests/test_mesh_cells.py`, `tests/test_mesh_build.py`,
+  `tests/test_mesh_dateline.py`; `tests/test_mesh_pipeline.py` and
+  `tests/test_mesh_clearance.py` rewritten. `count-mesh-triangles.py`
+  reads both formats.
+  `.github/workflows/build-mesh.yml` is rewritten for it (each build job
+  downloads its own district's zip from NOAA and builds from it alone)
+  and **has not yet been run; a release
+  run would publish `WRPMESH2` over the `WRPMESH1` meshes**.
+
 ### Added
 - `mesh-catalog.py` writes and validates the mesh catalogue
   `charts/mesh/index.json` that the router plugin downloads meshes from.

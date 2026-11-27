@@ -37,10 +37,13 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Install GDAL, pyyaml and the mesh packages (tests/test_mesh_pipeline.py)
+      # CGAL, GMP and MPFR: build-mesh.py compiles mesh/exact_cut.cpp with them
+      # (tests/test_mesh_build.py, tests/test_mesh_pipeline.py).
+      - name: Install GDAL, CGAL, pyyaml and the mesh packages
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gdal-bin build-essential libsqlite3-dev zlib1g-dev zstd
+          sudo apt-get install -y -qq gdal-bin build-essential libsqlite3-dev zlib1g-dev zstd \
+            libcgal-dev libgmp-dev libmpfr-dev
           pip install pyyaml -r mesh/requirements.txt
           ogrinfo --version
       - name: Install tippecanoe (same pinned version as the chart build)

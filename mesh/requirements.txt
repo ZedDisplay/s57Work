@@ -1,17 +1,17 @@
 # Navigation mesh build (build-mesh.py). The chart tool itself stays
-# standard-library-only; only the mesh job installs these.
+# standard-library-only; only the mesh job and the mesh tests install these.
 #
 # Pinned exactly, like tippecanoe and go-pmtiles in the workflows: a new
-# numpy, scipy, shapely (GEOS) or triangle release can change geometry
-# results with no change in this repository. These are the versions the
-# first CI mesh build installed on 2026-10-08 (Python 3.12, ubuntu-latest)
-# and passed every gating check with (01CGD, 35,668,991 triangles).
-# The experiment's own District 1 build ran the same versions except
-# shapely 2.1.2; both have produced a passing 01CGD mesh. Bump
-# deliberately, then rebuild and re-verify a district.
+# numpy, scipy, shapely (GEOS) or triangle release can change results with
+# no change in this repository. These are the versions the build from the
+# chart source cells was developed and run with (Python 3.12, macOS,
+# November 2026). Bump deliberately, then rebuild and re-verify a district.
+#
+# Not Python packages, and also needed: a C++17 compiler with CGAL, GMP and
+# MPFR, to compile mesh/exact_cut.cpp (developed with CGAL 6.1.1 from
+# Homebrew; Ubuntu: libcgal-dev libgmp-dev libmpfr-dev), and tar with zstd
+# for --archive.
 numpy==2.5.3
 scipy==1.18.1
 shapely==2.2.0
-mapbox-vector-tile==2.2.0
-pyshp==3.1.6
 triangle==20250106

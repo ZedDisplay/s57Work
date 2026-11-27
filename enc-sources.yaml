@@ -433,9 +433,10 @@ active:
   
 
 # ─── Navigation meshes (build-mesh.yml) ────────────────────────────────
-# Districts whose published chart gets a routing mesh (docs/MESH.md).
-# The mesh workflow runs after every chart publish and rebuilds a mesh
-# when its chart is newer. 17cgd is left out until asked for: its cells
+# Districts that get a routing mesh, built from their chart source cells
+# (docs/MESH.md). The mesh workflow runs after every chart publish and
+# rebuilds a mesh when its chart is newer. Each mesh is built from its
+# own district's charts alone. 17cgd is left out until asked for: its cells
 # cross the antimeridian (Aleutians), which one rectangle cannot hold.
 mesh:
   # GitHub-hosted larger runner created in the ZedDisplay org (Settings ->

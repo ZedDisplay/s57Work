@@ -1,428 +1,411 @@
 # Navigation mesh (`build-mesh.py`)
 
-A routing mesh of each district's charted water: a constrained Delaunay
-triangulation of the water with, per triangle, the charted depth, the
-vertical clearance, hazard and mark flags, fairway, dredged and
-traffic-zone labels, a shore penalty and a depth penalty. It is what the
-signalk-weather-router-plus plugin routes motoring legs on (its
-`meshDir` setting points at the unpacked folder).
+A routing mesh of each district's charted water: a triangulation of the
+water with, per triangle, the charted depth, the vertical clearance, a
+hazard depth, fairway, dredged and structure flags, and a shore and depth
+multiplier; per triangle side, the mark of a chart line lying on it; per
+triangle corner, the mark of a chart point there. It is what the
+signalk-weather-router-plus plugin routes motoring legs on.
 
-The build is the District 1 experiment of October 2026 made
-district-agnostic: the same four stages, the same intermediate files,
-the same constants and checks. The only things that changed are the
-ones that were hard-coded for District 1, and each is listed at the end.
+Since November 2026 the mesh is built from the charts themselves, the
+S-57 source cells, cut exactly. `build-mesh.py` reads NOAA's chart zips
+itself; it uses nothing of the chart tile build (`s57-to-mbtiles.py`).
+The build it replaces read the finished chart tiles; the reasons it was
+replaced are at the end.
 
-## Inputs
+**The tile format is `WRPMESH2`, index version 2. A router that reads
+only `WRPMESH1` (index version 1) cannot open these meshes.**
 
-- A finished chart `.mbtiles` (the published district file), decoded as
-  the old routing grid read its tiles, so the mesh is built from what
-  the chart publishes, with finer-wins already resolved by the chart
-  build. For every spot the most detailed zoom at which the chart covers
-  it is read: every z16 tile, whole, then z15, z14, … each tile only over
-  the part that no deeper tile's coverage (`M_COVR`, CATCOV 1, as carried
-  in the tiles) fills. The chart build renders a coastal-band cell to z14
-  and a general-band cell to z12; only approach and harbour cells and the
-  gap fills reach z16, so z16 alone (the rule until 2026-11-21) left the
-  water whose finest chart is band 3 with no depth, hazard or sounding.
-  Several files may be given; each is a separate source and the last
-  obstruction or dredged area of a tile wins within a source.
-- NOAA's ENC product catalogue, `ENCProdCat_19115.xml`
-  (<https://charts.noaa.gov/ENCs/ENCProdCat_19115.xml>, ~50 MB, the file
-  the chart build reads for replacement cells), with `--catalog`. It
-  lists every live chart cell of every district with its outline. A
-  coarser zoom of the chart is not read inside the outline of a cell
-  that the chart build renders deeper than that zoom
-  (`band_ceilings`, from the chart build's own zoom table): a district's
-  file holds coarse cells that reach into the next district's water,
-  and there the next district's mesh, built from the finer cells, is the
-  one that speaks. That water stays water of unknown depth in this mesh.
-  `--no-catalog` reads coarser zooms by the file's own coverage alone
-  and exists for a chart file whose water no other file charts and for
-  the tests; one of the two must be given, there is no default.
-- The OSM land polygons, `land_polygons.shp` from the
-  [osmdata.openstreetmap.de split package](https://osmdata.openstreetmap.de/data/land-polygons.html)
-  (`land-polygons-split-4326.zip`, ~700 MB). The data date is read from
-  the package `README.txt` and recorded. It applies only outside the
-  charts' coverage (`M_COVR`, CATCOV 1); inside it the chart decides,
-  `LNDARE` is land and what the chart draws as water is water. The OSM
-  polygons are built from coastline only, so the Great Lakes, Lake
-  Champlain, harbours behind a coarse shoreline and every river are land
-  in them; while OSM overrode the chart (to 2026-10-09) 09CGD meshed to
-  no water at all and 01CGD had no Hudson River. Without `--land` only
-  the charts' `LNDARE` is land; the CI always passes it.
+## Input
+
+The charts: NOAA's zips of S-57 cells (`01CGD_ENCs.zip`), or folders of
+them. A cell is `US<band>XXXXX.000` with its update files `.001`,
+`.002`, … beside it.
+
+A district's mesh is built from that district's charts and from nothing
+else: the arguments are its zip (several when its charts come in several
+files). The build makes every 0.25° tile their cells reach (the bounding
+box of each cell's skin-of-the-earth areas). No other district's charts
+are read, so each district's build stands by itself. Which cells belong
+to a district is NOAA's statement, not this build's: NOAA files a cell in
+the zip of every district it tags the cell with (an overview cell can
+belong to several: the Gulf overview `US1GLBCF` is tagged with districts
+5, 7 and 8 in NOAA's product catalogue, and is in each of their zips).
+
+Reading the charts is the build's first stage (`mesh/cells.py`), done
+with GDAL (`ogrinfo`, `ogr2ogr`, 3.7 or later), which applies a cell's
+update files to its base:
+
+1. Each zip is unpacked into the run's folder. A folder is read where it
+   lies and is never written to.
+2. The cells are found. A `.000` file whose name is not a NOAA cell name
+   of bands 1 to 6 is not read; it is printed and recorded in the
+   sidecar.
+3. Each copy's edition, update number and issue date are read from the
+   cell itself (its DSID record, updates applied). The update files
+   beside it must be exactly those from the one after the base's own
+   update number to the update number read with them applied; otherwise
+   a file was not applied and the build stops, naming the cell.
+4. **One copy of each cell** across the inputs: the latest issued (the
+   issue date, not the highest edition: a cancellation has edition 0 and
+   is the newest state). A copy whose issue date cannot be read, or two
+   copies issued the same day in different states, stop the build.
+5. **Cancelled cells** (edition 0 after updates, S-57 Appendix B.1 §5.7)
+   are left out and recorded.
+6. The layers the mesh reads (`LAYERS` in `mesh/build.py`) are extracted
+   from every live cell to GeoJSON, one file per layer.
+
+Nothing is kept from one run to the next: no cache, no marker, no list.
+Every run works in a new folder of its own, `<work>/run-XXXXXXXX`, so
+nothing of an earlier run can be read and nothing is emptied before a
+run. A folder of the charts that cannot be listed, a cell GDAL cannot
+read, a layer that fails to extract, a cell without an edition number, a
+cell with an update file that was not applied: each stops the build
+(exit 1) and names the folder or the cell. Nothing is downloaded by the build: the mesh is built from exactly
+the charts it is given.
+
+Coordinates are read in the source's own whole numbers, units of 1e-7
+degree, and stay in them until the mesh is written.
+
+## What the mesh says
+
+- **Only charted water is in the mesh.** Water is where the winning
+  chart has a depth area, a dredged area or an unsurveyed area and no
+  land. Land and uncharted space are not triangulated: a triangle side
+  with no neighbour is the shore or the edge of the charts.
+- **The most detailed chart wins**, spot by spot, among the district's
+  own charts. A chart speaks where it has a skin-of-the-earth area
+  (S-57 Group 1: `DEPARE`, `DRGARE`, `UNSARE`, `LNDARE`, `FLODOC`,
+  `HULKES`, `PONTON`). Bands rank 6, 5, 4, 3, 2, 1. Within bands 1 and 2
+  a new-scheme cell (region code `GLB`; `ARC`, `ANT`, `ATL`, `GRL`,
+  `GOM`, `PAC`) wins over a legacy cell, the chart build's Stage 2b
+  rule. Only the winning chart's areas, lines and points count at a
+  spot. The coverage outline (`M_COVR`) is not used. The winner is
+  decided by rank (band), not by cell: a shape of a cell of the winning
+  rank counts also where that cell itself has no skin-of-the-earth
+  area. A correctly made chart has no feature outside its own coverage,
+  so this gives the same mesh as deciding by cell; kept by rank on the
+  owner's decision of 2026-11-24, and may need to be revisited.
+- A pontoon, hulk or floating dock (`PONTON`, `HULKES`, `FLODOC`) with
+  no depth, dredged or unsurveyed area under it is not water.
+- A chart line lying exactly on a tile edge is marked by each tile from
+  the charts that win on its own side; where those differ the side gets
+  both records together, as a side inside a tile gets its mark from the
+  charts that win on both its sides.
+- **Depth** of a triangle: the shallowest `DEPARE` it lies in (`DRVAL1`,
+  the shallow end of the area's range); a dredged area's depth replaces
+  it; an obstruction or wreck area with a depth (`VALSOU`) lowers it. Of
+  two overlapping dredged areas, or two obstruction areas, the shallower
+  counts. −999 is no charted depth.
+- **Clearance** of a triangle under an overhead area (`BRIDGE`,
+  `CBLOHD`, `PIPOHD`, `CONVYR`): the lowest. An opening bridge (CATBRG
+  opening, swing, lifting, bascule, draw, transporter) carries its open
+  clearance (`VERCOP`) or none, never the closed one, and sets the
+  opening flag; a span with no charted height is none (−999), not 0.
+- **Chart lines stay lines.** A structure, obstruction, overhead,
+  recommended-track or navigation line becomes triangle sides, marked,
+  over its whole length, also where it lies in open water with the same
+  water on both sides. Nothing is drawn around it.
+- **Chart points stay points.** A rock, wreck, obstruction, buoy,
+  beacon, light, pile or mooring is a triangle corner at its own
+  position, marked with what it is and, for a hazard, its depth. A
+  sounding is kept, as a marked corner with its depth, where it is
+  shallower than the depth of the water it lies in (or that water has
+  none).
+- **Multiplier**: the shore multiplier (1.0 at 2 km or more from the
+  chart's land rising to 1.3 at the shore, on a 0.00025° lattice with
+  origin −75.5, 38.7; it stays 1.0 in narrow water, where no lattice
+  cell of the 2 km window around the spot is 1 km or more from land)
+  times the depth step (×2 under 2 m, ×1.5 under 5 m, ×1.2 under 10 m).
 
 ## Stages and files
 
-Under the work directory (`data/mesh/<name>/`, `--work`):
+Each run makes its own folder, `run-XXXXXXXX`, under the work directory
+(`data/mesh/<name>/`, `--work`). It is removed after a build that passed
+(kept with `--keep-intermediate`) and kept, its path printed, after one
+that did not.
 
 | Stage | Module | Writes |
 |---|---|---|
-| 1 decode | `mesh/decode.py` | `z16_layers/<LAYER>.pkl` (the folder keeps the experiment's name): per layer, a list of (WKB, properties) pieces clipped to the part of their tile they were read for (a z16 tile whole; a coarser tile where no deeper zoom has coverage), with `__src` and `__ord` |
-| 2 extent | `mesh/extent.py` | nothing; the rectangle(s) to mesh, see below |
-| 3a tiles | `mesh/build.py` `run_tiles` | `build/tile_III_JJJ.npz` (faces, labels, PSLG, medial axis, shore grid), `build/tiles.json` (per-tile results, timings, seam vertices, layer counts: the handoff to 3b), `build/progress_<pid>.log` |
-| 3b global | `mesh/build.py` `run_global` | `build/mesh_III_JJJ.npz` (triangles after the global refinement, neighbours, penalties), `build/parts.npz`, `build/summary.json` |
-| 4a finalize | `mesh/finalize.py` | `final/mesh_III_JJJ.npz`: uncompressed route-ready tiles with reverse edges and per-triangle labels |
-| 4b binary | `mesh/binary.py` | `<out>/<name>_mesh/mesh_III_JJJ.bin` + `index.json` |
+| cutter | `mesh/exact_cut.cpp` | `mesh/exact_cut`, compiled by the CLI when missing or older than its source |
+| charts | `mesh/cells.py` | in the run's folder: `charts/inputN/` (each zip unpacked), `cells/<CELL>/<LAYER>.geojson` (the extracted layers) |
+| tiles | `mesh/build.py` | in the run's folder: `cell-index.json` (the cells read), `tiles/tile_I_J.npz` (the cut of each tile), `tiles.json` (per-tile results) |
+| second stage | `mesh/finalize.py` | `<out>/<name>_mesh/mesh_III_JJJ.bin` + `index.json` |
+| CLI | `mesh/cli.py` | `<out>/<name>_mesh.json`, `<out>/<name>_mesh.tar.zst` (`--archive`) |
 
-Stage 3 per 0.25° tile (with a 100 m overlap, cropped afterwards): band
-merge, boundaries (lines as 3 m or 5 m strips, points as 20 m discs,
-soundings as squares of the old grid's 0.00025° cells), noding on a
-0.5 m grid, polygonize, classify and dissolve by label, plain CDT, the
-PSLG for the global step, medial axis, shore distance; then across
-tiles: seam weld, one global Triangle `q20` refinement, neighbours,
-split back into tile files, checks. The experiment's write-up of why
-each step is there is in the module docstrings.
+**Tiles.** Per 0.25° tile of a fixed world lattice (origin −180°, −90°
+exactly, so the date line is a tile edge): every shape of every cell that reaches the
+tile is handed whole to the exact cutter, a C++ program on CGAL's exact
+kernel (`Exact_predicates_exact_constructions_kernel`, constrained
+Delaunay triangulation with exact intersections). Crossing points are
+computed exactly; no grid, no snapping, no tolerance. Each triangle's
+state is the set of shapes it is inside, found by flooding from outside
+everything and toggling a shape at each piece of its outline. Whole
+shapes are given, not shapes trimmed to the tile, so two neighbouring
+tiles cut their shared edge identically. From the cut the tile stage
+takes the water's outline pieces (each with the water on its left and on
+its right), the kept chart points, and keeps the cut triangles.
 
-The CLI runs 3a and 3b in two freshly spawned interpreters
-(`run_fresh`). The tile stage leaves several GB of chart data and
-allocator residue in its process, and the global refinement is the
-memory peak of the build: on 2026-10-09 a 16 GB runner killed 01CGD
-there twice (9.28 M PSLG vertices) while the parent still held 6 to 7 GB
-it no longer needed. With the boundary the refinement starts from an
-empty heap and the label table is freed before Triangle runs. The
-outputs are byte-identical to the single-process `run()`, which stays
-for tests and direct use; `tiles.json` is the only new file.
+**Second stage**, once for the whole mesh: the tiles are joined (a side
+on a shared tile edge stays only where the water differs across it or a
+chart line lies on it); a corner where two pieces of the same input
+segment meet with the same water and the same mark on both is not a
+corner; one well-shaping run (Triangle, `pq20`: 20° minimum angle where
+the input allows) with one east-west scale for the mesh, `xScale` = cos
+of its middle latitude, which only affects how "well-shaped" is judged,
+never where anything is. Triangle is given the outline and the chart
+points only, no point per water part or per hole; it triangulates
+everything the outline encloses, and each triangle takes the water of
+the cut triangle holding its centre (tested exactly); the triangles that
+are not water are dropped. Then neighbours, side and corner marks, the
+shore multiplier; the checks; the files.
 
-In the output directory (`-o`, default `data/tiles/`):
+The second stage runs in its own interpreter, so it does not inherit the
+tile stage's memory.
 
-- `<name>_mesh/` — the mesh folder. `index.json` (version 1: `west`,
-  `south`, `east`, `north`, `tileDeg`, `xScale`, `triangles`, `tiles[]`
-  with `i`, `j`, `file`, `first`, `n`, `bbox`) and one `.bin` per tile.
-  Tile layout, little-endian: 32-byte header (`WRPMESH1`, uint32 n,
-  float64 origin lon, float64 origin lat, 4 bytes pad), then
-  `corners float64[n*6]` (x = lon × xScale, y = lat), `neighbours
-  int32[n*3]`, `mult float32[n]` (shore × depth penalty), `depth
-  float32[n]` (−999 unknown), `clear float32[n]` (−999 none), `hazv
-  float32[n]` (1e9 no hazard, −1e9 hazard of unknown depth), `rev
-  int8[n*3]`, `flags uint8[n]` (bit 0 navigable, 1 hazard, 2 mark, 3
-  channel mark, 4 structure, 5 fairway, 6 dredged, 7 opening bridge).
-  Under an opening bridge (CATBRG opening, swing, lifting, bascule,
-  draw, transporter) `clear` is the open clearance (VERCOP) or none,
-  never the closed one; a fixed span with no charted height is none,
-  not 0. The layout and the index version are unchanged: a reader that
-  ignores bit 7 routes through an opening bridge as if it stood open.
-- `<name>_mesh.json` — the sidecar: sources with size and SHA-256, the
-  chart's `build_date` when `--chart-json` is given, land polygon date,
-  z16 tile and cell counts (`z16_tiles_decoded`, `z16_cells`), the tiles
-  read at every zoom (`tiles_decoded_by_zoom`), the catalogue used
-  (`catalog`: file, size, SHA-256, cell outlines; null with
-  `--no-catalog`) and the coarser tiles left whole to a finer chart of
-  another file (`tiles_left_to_finer_charts`), each cluster's box, counts, timings, peak
-  RSS and the full requirement list with PASS/FAIL and detail, gating
-  failures, warnings, `passed`.
-- `<name>_mesh.tar.zst` with `--archive`.
+`exact_cut.cpp` uses CGAL's 2D triangulation package, licensed
+GPL-3.0-or-later. It is a separate program run by `mesh/build.py`.
 
-## Extent
+## The date line
 
-The rectangle around every 0.25° cell that holds a z16 tile of the
-input. Every tile of the rectangle is processed, as the experiment
-processed every tile of its District 1 box; a tile without chart data
-meshes as open water of unknown depth. The rectangle is still drawn from
-the z16 tiles alone: the coarser zooms fill in depths inside it and do
-not widen it. For 01CGD this is 36 × 23 = 828
-tiles of which 499 hold z16 data (the experiment's box had 704).
+The mesh is written as the router reads one
+(signalk-weather-router-plus `src/engine/mesh/store.ts`):
 
-The cells are counted from −180° + 0.000125°, −90° + 0.000125°, half a
-cell of the old routing grid's 0.00025° lattice (origin −75.5°, 38.7°)
-on which the build draws sounding squares and the fairway reach. A tile
-seam lying exactly on a lattice line puts every square abutting it on
-one side only: the labels differ across the seam, the seam stays as a
-constraint cut at every square corner, and the refinement inflates
-around it. Measured on 01CGD (same file, same code): seams on the
-lattice kept 14,954 label-differing seam segments and refined in
-1,646 s; the experiment's box, which happened to miss the lattice, and
-the offset grid keep 26 and refine in about 300 s. With the offset a
-seam and a lattice line always differ by half a cell
-(`tests/test_mesh_extent.py` asserts it).
+- stored longitudes are between −180 and 180;
+- the mesh's box is the shortest run of tile columns, going east, that
+  holds its tiles (the run that starts just east of the widest stretch
+  of empty columns round the earth). When that run crosses the date
+  line the index's `west` is greater than its `east`, and tile columns
+  `i` count east from `west` across the line;
+- the date line is a tile edge and stays an edge of the mesh also where
+  the same water lies on both sides: no triangle lies across it. A
+  corner on it is 180 in the tile west of it and −180 in the tile east
+  of it; the neighbour links join the two;
+- a tile's `bbox` is plain numbers and ends on the line at the latest.
 
-When the occupied columns fall into groups separated by more than 4° of
-empty columns, each group is a cluster built as its own rectangle with
-its own `xScale` (cos of its mid-latitude): 07CGD gives Florida and
-Puerto Rico, 14CGD gives Hawaii, Guam and American Samoa. A
-single-cluster district has `index.json` at the root of `<name>_mesh/`;
-a multi-cluster district has one sub-folder per cluster (named like
-`w158n20`: hemisphere and whole degrees of the rectangle's south-west
-corner) and a `meshes.json` listing them. Cells on both sides of the
-antimeridian are refused (Alaska).
+NOAA ends its cells on the date line (no cell of any district has a
+polygon across it, catalogue of November 2026); a cell whose charted
+areas run across it stops the build. The two tiles that share the line
+are each given the other side's shapes a turn away, so both cut that
+edge alike, as two tiles do anywhere else. Inside the build a mesh
+across the line is worked on in one piece (the columns east of the line
+one turn further east); the chart's own corners are carried as their
+whole numbers throughout, and only the points the well-shaping adds
+come from its arithmetic.
+
+A district that merely sits on both sides of the line (14CGD: the
+western Pacific ends at 173.5°E, the central Pacific starts at 180°)
+gets the short box across the line, not the long one round the earth.
+`tests/test_mesh_dateline.py`.
 
 ## Checks and exit status
 
-The experiment's requirement list is evaluated per cluster and written
-to the sidecar. All of them gate except two:
+Every check stops the build; there are no warnings that publish.
 
-| # | Requirement | Gates |
-|---|---|---|
-| 1 | every tile built | yes |
-| 2 | every layer class present in the input | warning |
-| 3 | every dangerous hazard point and every mark inside a flagged face or on land | yes |
-| 4 | mesh land area equals charted + OSM land area | yes |
-| 5 | seams: no non-manifold edges, mesh area equals water area, no cracks | yes |
-| 6 | no clockwise or zero-area triangles | yes |
-| 7 | minimum angle 20° except at sharp input corners | warning |
-| 8 | every triangle has a valid part | yes |
-| 12 | neighbour links symmetric | yes |
-| 13 | penalties in range | yes |
-| 14 | the 3 × 3 block around the densest tile loads from the files alone | yes |
-| 15 | usable chart coverage (`M_COVR`, `CATCOV` 1) present in the decoded input, also under `--reuse-decoded` | yes |
-| 9, 10, 11 | medial axis step, hazard columns, time measured | yes (always pass) |
+Charts (exit 1): an input that is neither a zip nor a folder; a folder
+of the charts that cannot be listed; no cell in the charts; a cell or a
+layer GDAL cannot read; a cell without an edition number; a cell with an
+update file that was not applied; copies of a cell that cannot be
+decided between; a cell across the date line; no live cell with charted
+areas.
 
-Plus two more that gate: the finalize step's reverse-edge check, and
-"no tile failed to decode" (a tile that does not decode drops its
-hazards, depth areas and land silently, and no later check can see
-that). Exit 0 when all gating checks pass, 2 when one fails (the
-outputs and the intermediates are left in place for diagnosis;
-`--allow-fail` makes it 0), 1 when the build itself fails.
+Tile stage (exit 1): a tile whose cut fails or contradicts itself; a
+chart point whose corner is not at the point's own position; a side
+whose mark differs between its two triangles.
+
+Second stage (exit 2):
+
+- a side recorded more than twice, or twice other than on a tile edge;
+  tile-edge sides that overlap (two tiles cut their shared edge
+  differently); outline pieces joined into one segment that disagree
+  about the water on each side;
+- the well-shaping step did not hand back the input corners unchanged;
+  a triangle whose centre lies in a tile that was cut but in none of its
+  cut triangles, or in cut triangles of different water; a triangle
+  across the date line, or a corner of a side on it that is not on it; a
+  clockwise or zero-area triangle;
+- a side shared by more than two triangles; a one-sided side that is not
+  on an outline; a neighbour link that is not mutual;
+- **every triangle's water against the outline pieces' own record**,
+  independently of the lookup it was taken from: a triangle side on an
+  outline segment must have, on the triangle's side, the water the
+  pieces recorded there (and where no triangle lies across, the far side
+  must be recorded as not water); a side on no outline must have the
+  same water on both sides. Every triangle is joined to the outline
+  through sides of the second kind, so this fixes every triangle's
+  water;
+- a chart-line segment with no triangle side on it; a chart point that
+  is not a corner of any triangle;
+- the mesh's water area differs from the cut's (by more than 1e-9 of
+  it);
+- a shore multiplier outside 1.0 to 1.3.
+
+The share of triangles under 20° is printed and does not gate (sharp
+corners in the chart itself cannot be widened).
+
+Exit 0: built, every check passed, sidecar (and archive) written; the
+sidecar is written last. On 1 or 2 no sidecar is written. The earlier
+result of the same name (mesh folder, sidecar, archive) is removed when
+a build starts, so after a build that failed there is none.
+
+## Output
+
+In the output directory (`-o`, default `data/tiles/`):
+
+- `<name>_mesh/index.json`: `version` 2, `format` `WRPMESH2`, `name`,
+  `west`, `south`, `east`, `north` (the rectangle of the tile lattice
+  around the tiles built; `west` greater than `east` across the date
+  line), `tileDeg` 0.25, `xScale`, `triangles`,
+  `tiles[]` with `i`, `j`, `file`, `first`, `n`, `bbox`, and `fields`,
+  `sideFlagBits`, `cornerFlagBits`. Only tiles that hold triangles have
+  a file. A triangle is filed under the tile holding its centre.
+- `<name>_mesh/mesh_III_JJJ.bin`, little-endian: 32-byte header
+  (`WRPMESH2`, uint32 n, float64 origin lon, float64 origin lat, 4 bytes
+  pad), then, n triangles each:
+
+  | Field | Type | Meaning |
+  |---|---|---|
+  | corners | float64[n×6] | x = lon × xScale, y = lat, counter-clockwise |
+  | neighbours | int32[n×3] | triangle id across side k (corners k, k+1), −1 none |
+  | mult | float32[n] | shore × depth multiplier |
+  | depth | float32[n] | metres, −999 none |
+  | clear | float32[n] | metres, −999 none |
+  | hazv | float32[n] | hazard area depth; 1e9 no hazard, −1e9 hazard of unknown depth |
+  | rev | int8[n×3] | which side of the neighbour comes back, −1 none |
+  | flags | uint8[n] | bit 0 navigable (fairway, dredged, recommended track), 1 hazard area, 4 structure area, 5 fairway, 6 dredged, 7 opening bridge. Bits 2 and 3 (mark, channel mark in `WRPMESH1`) are not set: marks are corners |
+  | sideFlags | uint8[n×3] | 1 structure, 2 hazard, 4 overhead, 8 opening, 16 recommended track, 32 navigation line |
+  | sideClear | float32[n×3] | clearance of an overhead line, −999 none |
+  | sideHazv | float32[n×3] | depth of a hazard line; 1e9 none, −1e9 unknown |
+  | cornerFlags | uint8[n×3] | 1 hazard, 2 mark, 4 channel mark (lateral buoy or beacon, daymark), 8 sounding |
+  | cornerVal | float32[n×3] | depth of a hazard or sounding corner; 1e9 none, −1e9 hazard of unknown depth |
+
+  122 bytes per triangle. Both triangles of a side carry its mark; every
+  triangle at a corner carries the corner's mark.
+- `<name>_mesh.json`, the sidecar: `name`, `format`, `build_date`,
+  `build_seconds`, `builder_version`, `workers`, `charts` (per input: its
+  file name, size, the cell files found and the `.000` files not read;
+  then the cells given more than once, the cancelled cells left out, the
+  live cells, and the cells read by band),
+  `chart_build_date` and `chart_metadata` (from `--chart-json`),
+  `tile_stage` (tiles, water, land and uncharted area, water without a
+  depth, sides on chart lines, chart points as corners), `clusters` (one
+  entry: the mesh's rectangle), `triangles`, `mesh_tiles`, `bytes`,
+  `passed`. `mesh-catalog.py` builds the catalogue entry from it.
+- `<name>_mesh.tar.zst` with `--archive`; its top folder is
+  `<name>_mesh/`.
+
+A district is one mesh with one rectangle and one `xScale`, also where
+its water lies far apart (07CGD: Florida and Puerto Rico in one mesh).
+
+A district's overview cells (bands 1 and 2) are among its charts, so its
+mesh reaches as far as they do: District 5's and District 7's meshes both
+hold the whole Gulf of Mexico from `US1GLBCF`, and two districts' meshes
+overlap wherever both districts' charts cover the same water, one perhaps
+in more detail than the other. Which of two installed meshes a router
+uses for water both cover is the router's matter, not this build's.
 
 ## Running locally
 
 ```bash
-pip install -r mesh/requirements.txt     # numpy scipy shapely mapbox-vector-tile pyshp triangle
-./build-mesh.py data/tiles/01CGD_ENCs.mbtiles \
-    --land /path/to/land-polygons-split-4326/land_polygons.shp \
-    --catalog data/ENCProdCat_19115.xml \
-    -o data/tiles -j 7 --archive
+pip install -r mesh/requirements.txt     # numpy scipy shapely triangle
+# GDAL 3.7 or later (ogrinfo, ogr2ogr; Homebrew: gdal; Ubuntu: gdal-bin)
+# a C++17 compiler with CGAL, GMP and MPFR (Homebrew: cgal; Ubuntu: libcgal-dev libgmp-dev libmpfr-dev)
+./build-mesh.py 01CGD_ENCs.zip --name 01CGD -o data/tiles -j 7 --archive
 ```
 
-Options: `--catalog XML` or `--no-catalog` (one is required, see
-Inputs), `--name` (default: the input's stem without `_ENCs`),
-`--work`, `-j/--workers`, `--reuse-decoded` (skip stage 1 when the
-pickles exist), `--box W,S,E,N` (diagnostic: mesh this rectangle
-instead of the derived one), `--snap-discs` (move disc corners within 2 m of another
-line onto it; off, as in the experiment's kept build), `--debug-point
-LON,LAT` (dump the faces and layers at a point to `build/debug_I_J.json`),
-`--chart-json`, `--archive`, `--allow-fail`, `--keep-intermediate`.
+Every path given is resolved once (symbolic links followed) and checked
+once. The build removes the earlier result of the same name
+(`<out>/<name>_mesh`, its sidecar and archive): nothing it is given may
+be one of those or lie inside the mesh folder, and a charts folder may
+not hold the mesh folder or the work directory.
 
-District 1 on an M-series Mac with 7 workers: about 20 minutes, 33
-million triangles, peak RSS 6 GB in the main process and 4 GB in the
-largest worker. Memory, not time, is what limits the worker count on a
-16 GB machine.
+Options: `--name` (required), `-o`, `--work`, `-j/--workers`, `--chart-json FILE` (the published chart's metadata; its
+`build_date` becomes `chart_build_date`), `--archive`,
+`--keep-intermediate` (keep the run's folder: the unpacked charts, the
+extracted layers and the cut of every tile, several GB for a district).
+
+## Tests
+
+- `tests/test_mesh_clearance.py`: the clearance rule.
+- `tests/test_mesh_rules.py`: what a piece of water carries from the
+  shapes it lies in; the cell index (order, new scheme before legacy,
+  what is left out and refused); which tiles are built.
+- `tests/test_mesh_cells.py`: reading the charts, on the five-cell
+  fixture of real cells: one copy per cell (the latest issued), the
+  cancelled cell, what is extracted, a folder read in place, what cannot
+  be read, an update file that was not applied, a folder that cannot be
+  listed. Needs GDAL and the mesh packages.
+- `tests/test_mesh_build.py` and `tests/test_mesh_dateline.py`: the mesh
+  of hand-made cells, read back from the mesh files: only charted water,
+  the most detailed chart wins, lines as marked sides over their whole
+  length, points as marked corners, soundings, the format, the date
+  line; a wrong water from the lookup, with the water area unchanged,
+  stops the build (the check against the outline record). Hand-made shapes cannot be written as S-57 cells, so these give
+  the build its cells as shapes and run everything after the reading,
+  through the same function `build-mesh.py` runs
+  (`tests/build_from_shapes.py`). Need the mesh packages and CGAL.
+- `tests/test_mesh_pipeline.py`: `build-mesh.py` on the fixture zip, end
+  to end; a district's charts in two files; charts that cannot be
+  read; two runs in the same folders with the zip changed in between;
+  the paths the build refuses. Needs GDAL, the mesh packages and CGAL.
+- `tests/test_mesh_catalog.py`: the catalogue writer.
 
 ## CI: `.github/workflows/build-mesh.yml`
 
+**Rewritten for this build on 2026-11-24 and not yet run.** Until a test
+run has passed, nothing below is verified on a runner (in particular the
+CGAL version Ubuntu installs: the cutter was developed with CGAL 6.1.1).
+
 Runs after every "Build ENC Charts" run on the default branch, and on
-demand. It is not told which districts changed: for each district in the
-`mesh.active` list of `enc-sources.yaml` it fetches the published chart's
-`charts/<D>_ENCs.json` and the mesh's `charts/<D>_mesh.json` from the R2
-public URL and rebuilds when the chart's `build_date` is newer than the
-mesh's `chart_build_date`, or when no mesh exists. A chart run that did
-not publish changes no dates, so the mesh run ends in seconds. `force`
-rebuilds regardless; a named `builds` list restricts the set.
+demand. For each district in the `mesh.active` list of `enc-sources.yaml`
+the plan compares the published chart's `build_date`
+(`charts/<D>_ENCs.json`) with the mesh's `chart_build_date`
+(`charts/<D>_mesh.json`) and rebuilds when the chart is newer or no mesh
+exists; `force` rebuilds regardless; a named `builds` list restricts the
+set; a test run always builds.
 
-Each district is one matrix job on the runner named by `mesh.runner`
-with `mesh.workers` tile workers: install the packages, restore or
-download the land polygons (cached per calendar month), download the
-chart from R2 and NOAA's product catalogue (fresh each run), run
-`build-mesh.py --archive --chart-json --catalog`, upload
-`<D>_mesh.tar.zst` and `<D>_mesh.json` as the run artifact. A gating
-failure fails the job and nothing of that district is published.
+- `build`: one job per mesh on the runner named by `mesh.runner`: install
+  GDAL, CGAL, GMP, MPFR and the packages, download that district's zip
+  from NOAA, fetch the published chart's record, run `build-mesh.py
+  <the district's zip> --name <D> --chart-json … --archive`, upload
+  `<D>_mesh.tar.zst` and `<D>_mesh.json`. Each district's job is
+  independent of the others. A failed check fails the job and nothing of
+  that district is published.
+- `release` and `test-stage` are as before: `<D>_mesh.tar.zst` and
+  `<D>_mesh.json` to the `latest` release and R2 `charts/`, the unpacked
+  folder to `charts/mesh/<D>/`, `charts/mesh/index.json` by
+  `mesh-catalog.py`, the notes by `release-notes.sh`; a test run stages
+  to `charts-test/<branch>/` and touches nothing published.
 
-Publishing (`release`, scheduled chart runs and manual `release` runs on
-the default branch), one district at a time so the runner's disk holds
-it:
+The charts are NOAA's zips at the time of the mesh run, so their cells
+can be newer than the cells the published chart tiles were built from;
+`chart_build_date` records which chart build triggered the mesh.
 
-- `<D>_mesh.tar.zst` (when under GitHub's 2 GiB asset limit) and
-  `<D>_mesh.json` to the `latest` release, replacing the previous ones;
-- the same two files to R2 `charts/`;
-- the unpacked folder to R2 `charts/mesh/<D>/` with `aws s3 sync
-  --delete`, so a mirror of that prefix is a valid `meshDir`;
-- `charts/mesh/index.json` rebuilt by `mesh-catalog.py` from every
-  `*_mesh.json` in `charts/`: version 1, one entry per mesh with `name`,
-  `dir`, `archive` (relative, `<D>_mesh.tar.zst`), `archive_url` (the
-  absolute HTTPS URL of that archive), `sidecar`, `build_date`,
-  `chart_build_date` (or null), `format`, `triangles`, `bytes` and
-  `clusters[].box`. The script validates every field the plugin requires
-  (name charset, `.tar.zst`, ISO dates, non-negative counts, a non-empty
-  cluster list with finite `[west, south, east, north]` boxes) and HEADs
-  every `archive_url` for 200 and a plausible `Content-Length`; one bad
-  entry fails the step and the previous catalogue stays. The archive's
-  top folder is `<D>_mesh/`, which the plugin unpacks from;
-- the release notes rewritten by `release-notes.sh` (shared with the
-  chart workflow): charts section, then a navigation meshes section.
+**A release run publishes `WRPMESH2` meshes under the existing names in
+`charts/` and in the catalogue. A plugin that reads only `WRPMESH1`
+downloads the newer mesh over its working copy and then cannot open it.
+Do not run `release` (and do not let a chart release trigger this
+workflow from the default branch) before the router reads `WRPMESH2`.**
 
-First CI run (2026-10-08, branch test, 01CGD from the chart staged the
-same day): `ubuntu-latest`, `workers: 2`; 864 tiles, 35,668,991
-triangles in 494 tiles, every gating check passed; build step 33 min,
-job 40 min, staging 2.5 min; peak RSS as Linux reports it 15.0 GB main
-process and 11.6 GB largest child (the refinement fork), so two workers
-fit the 16 GB runner with little margin. The land-polygon download took
-5.5 min uncached. GitHub's larger runners are not available to personal
-accounts, so the standard runner is the only one.
+## Why the build from the chart tiles was replaced
 
-Test pathway (`publish: test`, the default for manual runs): the same
-outputs go to R2 `charts-test/<branch>/` (archive, sidecar and
-`mesh/<D>/` folder) and the run artifacts; a branch's run reads the
-chart from `charts-test/<branch>/` when one is staged there, else from
-`charts/`. Nothing published is touched.
+Measured on District 1 in November 2026:
 
-## Measured against the experiment (2026-10-08)
+- The old mesh filled its whole rectangle; water no chart covers was in
+  it as water of unknown depth.
+- The tiles are not the charts: along 16.4 % of the land/depth border
+  at zoom 16 (9.5 % at zoom 14, 5.4 % at zoom 12) the two sides of the
+  border are not the same line. In the source cells they are (0.00 to
+  0.01 %, overlap 0.0 m²).
+- The tile reader converted tile pixels to latitude linearly instead of
+  by the Web Mercator formula: zoom 9 tiles were placed 40 to 63 m off,
+  zoom 10 tiles 16.8 m.
+- Everything was snapped to a 0.5 m grid, and pieces were then labelled
+  by one point against the unsnapped shapes: about 0.29 km² per district
+  on the wrong side of a line. Without a grid the geometry library
+  (GEOS) does not cut exactly: uncut crossings and hair-thin pieces.
+- Lines were drawn as 3 m strips and points as 20 m discs; their corners
+  fell a hair from chart lines and stopped the well-shaping step.
 
-Same chart file (01CGD, 2026-09-07), same code path, three runs:
-
-| Run | Box | Kept seam segments | Refinement | Triangles | Tiles |
-|---|---|---|---|---|---|
-| experiment (4 files) | hand-drawn D1 | 26 | 288 s | 33,044,145 | 437 |
-| `--box` D1, 01CGD only | hand-drawn D1 | 26 | 628 s | 35,541,267 | 439 |
-| derived, lattice-aligned | 36 × 23 from −180/−90 | 14,954 | 1,646 s | 35,404,354 | 460 |
-| derived, offset grid | 36 × 23 from −180/−90 + ½ cell | 39 | 485 s | 35,520,554 | 460 |
-
-Findings, each measured on the tile files rather than inferred:
-
-- **Seams on the lattice** (above): the only cause of the 14,954 kept
-  segments; moving the box reproduces the experiment's 26 exactly.
-- **Penobscot Bay and Mount Desert** carry 2 to 4 times the boundary
-  vertices of the experiment in a dozen tiles, from sounding squares.
-  The experiment's fourth input, `ME_ENCs.mbtiles` of 2026-08-21, was
-  built before the chart pipeline's finer-wins erase and stacks a
-  coarse-band `DEPARE` (DRVAL1 0, DRVAL2 18.2) under the band 5 areas
-  across the bay. The build takes the minimum over depth areas, so the
-  experiment had depth 0 there and almost no sounding squares. The
-  district file alone has the erase applied and the sounding rule works
-  against the band 5 values. The district file is right; the
-  experiment's input was not.
-- **New Jersey shore** (lon −74.5..−74.0, lat 39.5..40.3): the
-  experiment's box reached into 05CGD waters, which 01CGD does not
-  chart. The derived box starts at 40.0°, so this water is outside the
-  01CGD mesh and belongs to the 05CGD mesh.
-- 633 of the 704 D1-box tiles are identical in every count.
-- New York Harbor, Woods Hole and Massachusetts Bay probes agree with
-  the experiment within 1 percent (`count-mesh-triangles.py`).
-
-## Differences from the experiment
-
-Everything below was agreed before it was coded; everything else is the
-experiment as it was.
-
-- **Extent**: the rectangle around the z16 cells instead of the
-  hand-drawn District 1 box; split into longitude clusters when the
-  district is disjoint. The cell grid is offset half a lattice cell from
-  −180°/−90° so no seam lies on the sounding-grid lattice (above).
-  `--box W,S,E,N` meshes an explicit rectangle instead, with the tile
-  grid from its south-west corner as the experiment's was; it exists to
-  reproduce the experiment and to test seam placement.
-- **Projection scale**: cos of each rectangle's mid-latitude, as the
-  experiment's `K` was for its box.
-- **Requirement 14**: the route-ready region is the 3 × 3 block around
-  the tile with the most triangles instead of a fixed Woods Hole box.
-- **Gating**: the experiment printed the requirements and exited 0;
-  here all but 2 and 7 gate, and requirement 15 (chart coverage
-  loaded) is new: without `M_COVR` the OSM land overrides the chart
-  everywhere, so a decoded input without it is never published.
-- **Parameters** replace env vars and constants: output and land paths,
-  `--snap-discs` (the experiment's `MESH_SNAP`), `--debug-point`
-  (`MESH_DEBUG`). The old grid's cell lattice origin (−75.5, 38.7,
-  0.00025°) is kept verbatim; it is index-relative arithmetic and works
-  west and south of the origin unchanged.
-- **MVT extent**: the decoder refuses a layer whose extent is not 4096
-  instead of silently mis-scaling it.
-- **Chart wins inside its coverage** (2026-10-09): the OSM land polygons
-  are clipped to the outside of the charts' `M_COVR` before they enter
-  the faces, the shore distance and requirement 4; the decoder now reads
-  `M_COVR` from the z16 tiles for that. The experiment let OSM land
-  override charted water, which cost the Great Lakes (09CGD: "no water
-  in the rectangle"), the Hudson and every harbour or river behind the
-  OSM coastline. `check-mesh-land-mask.py` measures the charted water a
-  land mask turns into land, per 0.25° cell.
-- **Requirement 3 within the snap grid** (2026-10-09): a hazard or mark
-  point is looked up in the faces within GS (0.5 m) of it, not by an
-  exact hit. Every input is snapped to that grid, so a point under 0.5 m
-  from a tile edge could sit between the snapped edge and the tile box,
-  in no face of either tile, and fail the gate although its disc was
-  built and flagged (an obstruction 0.17 m east of a seam at New
-  Buffalo, 09CGD).
-- **Opening bridges** (2026-10-08): the experiment stored the first of
-  VERCCL, VERCLR, VERCSA for every bridge, so a bascule, swing or lift
-  bridge was a fixed span at its closed height (Broadway Bridge, lift,
-  7.3 m although it opens to 41.1 m) and a 5 m strip across the channel
-  closed the waterway for any taller mast; a bridge with no clearance
-  attribute became 0 m and blocked every vessel (2,071 of the 2,978
-  District 1 bridges). Now `clearance_of` reads CATBRG: an opening
-  bridge sets flag bit 7 and carries VERCOP or none, a missing height
-  is none. The experiment also sorted overhead pipelines and conveyors
-  (PIPOHD, CONVYR) into a second column, `clear2`, that its finalize
-  never wrote, so they never blocked anything; all four layers now share
-  `clear`, the lowest over a face (District 1: 41 pipelines, 3 with a
-  charted height, one of 8.5 m; 2 conveyors, none with a height).
-- **Seam weld, T-junction split** (2026-10-10): the experiment's weld
-  moves a seam vertex up to two grid steps onto the neighbour's vertex
-  without looking at what the vertex's own segments now pass through.
-  In New York Harbor one such move put a segment exactly through a
-  neighbouring vertex, and Triangle's refinement of the merged domain
-  never terminated: the four harbour squares refined in 7 s without the
-  weld, not in 60 s (16 GB) with it; the whole district was killed at
-  that step on 16 GB and 32 GB runners alike, while every tile refined
-  on its own in 36 s in total. The water that exposed it (the Kills,
-  Newark Bay, the Hudson) only became mesh water with the chart-wins
-  coverage change, which is why earlier builds never hit it. After the
-  weld, `split_segments_through_vertices` splits any segment ending at a
-  moved vertex at the vertices that lie on it (within a grid step),
-  keeping the segment's part; the seam line reports the count. With the
-  fix the 8 × 8 New York block refines to 9.30 M triangles in 64 s at
-  1.8 GB, ratio 1.00 to the per-tile sum (`tests/test_mesh_weld.py`).
-- **The most detailed covering zoom, not z16 alone** (2026-11-21): the
-  experiment read z16 tiles only, with no fallback. The chart build
-  renders band 3 to z14 and band 2 to z12, so water whose finest chart is
-  band 3 had no z16 tile and meshed as water of unknown depth although
-  the chart file holds its depth areas: 01CGD of 2026-11-19 has a 237.7 m
-  depth area at 42.6382, −69.7644 at z14 and no tile there at z15 or
-  z16, and 143,753 km² of its tile area lies under a z14 tile that holds
-  depth areas but has no z16 tile. `mesh/decode.py` now reads, after
-  every z16 tile, each coarser tile over the part no deeper tile's
-  coverage fills. Two things it had to get right, both measured on 01CGD:
-  it goes by the chart's coverage in the tiles, not by whether a deeper
-  tile exists (a z16 tile at a chart's edge exists but is covered only in
-  part; a first version left the rest empty, a strip one tile wide along
-  chart edges that cut 72,693 km² of water with a depth off from the rest
-  once water without a depth was closed); and an area cut by that part
-  keeps only its area pieces (a line left where the two merely touch
-  makes the rejoined feature a mixed collection, which stage 3 drops
-  whole: 0.3° blocks of `LNDARE` and `DEPARE` went that way). Result on
-  01CGD, the whole district built on a 16 GB Mac, every gating check
-  passed: 44,369,047 triangles in 539 tiles (42,217,242 in 538 before);
-  water with a depth 201,758 km² of 252,237 km²; of the 50,479 km²
-  without one, 12 km² lies inside chart coverage (8 km² unsurveyed,
-  3 km² depth areas with no value) and the rest is water no chart
-  covers; with water without a depth closed, 4.7 km² of water with a
-  depth is separated from the main body. The extent rule is unchanged.
-  `tests/test_mesh_decode.py`.
-- **Not where a finer chart exists in another district's file**
-  (2026-11-22). The meshes published on 2026-11-21 read a coarser zoom
-  wherever their own file had no finer coverage. A district's file also
-  holds coarse cells that reach into the next district's water, and
-  there the coarse chart contradicted the detailed one: 01CGD's coastal
-  cell draws the New Jersey shore as one depth area of 0 to 18.2 m and
-  Barnegat Bay and the Shark River as land. A depth area's shallow end
-  is the mesh's depth, so in the tile −74.25..−74.0, 39.75..40.0 the
-  01CGD mesh had 274.1 km² at 0.0 m where the 05CGD mesh has for example
-  9.1 m (39.84592, −74.03921), and closed to a boat needing 2.5 m
-  144.4 km² that the 05CGD mesh allows; over the district the water at
-  0.0 m had grown from 2,466 to 2,923 km². Now a coarser tile is also
-  trimmed by the outlines, from NOAA's product catalogue, of every live
-  cell of any district that the chart build renders deeper than that
-  tile (`read_catalog_cells`, `band_ceilings`, `FinerElsewhere` in
-  `mesh/decode.py`; `--catalog`). Result on 01CGD, whole district built
-  locally, every gating check passed: that New Jersey tile is as it was
-  before 2026-11-21 (327.9 km² of water, none with a depth from this
-  mesh, nothing closed that 05CGD allows); water at 0.0 m 2,477 km²;
-  water with a depth 200,069 km² of 252,243 km² (1,695 km² less than
-  without the rule, one block off New Jersey); the open-water depths
-  are kept (237.7 m at 42.6382, −69.7644; 54.8 m at 40.3798, −72.0945).
-  Where only a coarse chart exists at all, a foreign shore for example,
-  its wide depth areas stay, and a band that starts at 0 m closes that
-  water to the router. The cell outlines include this file's own cells;
-  where one has no data in part of its outline that part gets no coarser
-  chart either (not measurable on 01CGD: the totals outside the New
-  Jersey block match).
-- **A triangle past the east or north edge** (2026-11-21): the split into
-  tile files filed a triangle under the tile its centroid falls in, held
-  at column and row 0 on the west and south sides only. The mesh's
-  vertices are snapped to the 0.5 m grid, so its outline lies up to half
-  a grid step outside the rectangle; two triangles of 0.087 and 0.027 m²
-  against 01CGD's east edge had centroids 1e-7 and 6e-7 degrees past it
-  and were filed under column 36 of 36, and the split stopped on the
-  missing tile file. `tile_index` (`mesh/build.py`) holds the index on
-  all four sides. The published builds have the same outline and never
-  had a triangle that thin there; the coarser zooms brought a depth
-  contour to that edge.
-- **Not ported**: the experiment's Python routers, grid comparison and
-  live-API timing scripts, and the funnel test. Router parity against
-  the saved trips is the plugin repository's test.
+The new build removes each cause: source cells, exact cutting with no
+grid, lines as sides and points as corners, only charted water.

@@ -1,9 +1,9 @@
-"""The clearance rule of the mesh build's classify stage (mesh.build.clearance_of)."""
+"""The clearance rule of the mesh build (mesh.build.clearance_of)."""
 import unittest
 
 try:
-    from mesh.build import clearance_of, is_opening_bridge
-except ImportError:          # numpy / shapely / scipy / triangle missing
+    from mesh.build import clearance_of
+except ImportError:          # numpy / shapely / scipy missing
     clearance_of = None
 
 
@@ -28,12 +28,12 @@ class ClearanceOf(unittest.TestCase):
             self.assertEqual(clearance_of("BRIDGE", {"CATBRG": code}), (None, True), code)
 
     def test_list_valued_catbrg(self):
-        self.assertTrue(is_opening_bridge({"CATBRG": "1,3"}))
-        self.assertTrue(is_opening_bridge({"CATBRG": "(5,9)"}))
-        self.assertFalse(is_opening_bridge({"CATBRG": "1,9"}))
-        self.assertFalse(is_opening_bridge({"CATBRG": "12"}))
-        self.assertFalse(is_opening_bridge({"CATBRG": None}))
-        self.assertFalse(is_opening_bridge({}))
+        self.assertEqual(clearance_of("BRIDGE", {"CATBRG": "1,3"}), (None, True))
+        self.assertEqual(clearance_of("BRIDGE", {"CATBRG": "(5,9)"}), (None, True))
+        self.assertEqual(clearance_of("BRIDGE", {"CATBRG": "1,9"}), (None, False))
+        self.assertEqual(clearance_of("BRIDGE", {"CATBRG": "12"}), (None, False))
+        self.assertEqual(clearance_of("BRIDGE", {"CATBRG": None}), (None, False))
+        self.assertEqual(clearance_of("BRIDGE", {}), (None, False))
 
     def test_pipelines_and_conveyors_carry_a_height(self):
         self.assertEqual(clearance_of("PIPOHD", {"CATPIP": "6", "VERCLR": "8.5"}), (8.5, False))
