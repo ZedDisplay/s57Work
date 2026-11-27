@@ -147,6 +147,42 @@ class ReadingTheCharts(unittest.TestCase):
             self.charts(str(nozip))
         self.assertIn("is neither a zip nor a folder", str(cm.exception))
 
+    def test_an_update_file_that_is_not_applied_stops_the_build(self):
+        # the cancelled cell's only update, .001, renamed .002: .001 is missing, so .002 cannot be applied
+        src = self.tmp / "src"
+        with zipfile.ZipFile(h.FIXTURE_ZIP) as z:
+            z.extractall(src)
+        one, = src.rglob(f"{h.FIXTURE_CANCELLED}.001")
+        one.rename(one.with_suffix(".002"))
+        with self.assertRaises(C.ChartsError) as cm:
+            self.charts(str(src))
+        self.assertIn("1 cell(s) cannot be read", str(cm.exception))
+        self.assertIn(h.FIXTURE_CANCELLED, str(cm.exception))
+        self.assertEqual(C.update_files(str(one.with_suffix(".000"))), [2])
+
+    def test_the_update_files_and_numbers_read(self):
+        # the cancelled cell: base update number 0, its one update .001 applied
+        ch = self.charts(self.zip_without("WHOLE_ENCs.zip", set()))
+        self.assertEqual(ch.cancelled, [h.FIXTURE_CANCELLED])
+        enc, = (self.run_dir / "charts").rglob(f"{h.FIXTURE_CANCELLED}.000")
+        self.assertEqual(C.update_files(str(enc)), [1])
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root lists any folder")
+    def test_a_folder_that_cannot_be_listed_stops_the_build(self):
+        src = self.tmp / "src"
+        with zipfile.ZipFile(h.FIXTURE_ZIP) as z:
+            z.extractall(src)
+        shut = src / "ENC_ROOT" / "SHUT"
+        shut.mkdir()
+        shut.chmod(0)
+        try:
+            with self.assertRaises(C.ChartsError) as cm:
+                self.charts(str(src))
+        finally:
+            shut.chmod(0o755)
+        self.assertIn(f"1 folder(s) of {src} cannot be listed", str(cm.exception))
+        self.assertIn(str(shut), str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

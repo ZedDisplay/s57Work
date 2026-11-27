@@ -42,7 +42,10 @@ update files to its base:
    of bands 1 to 6 is not read; it is printed and recorded in the
    sidecar.
 3. Each copy's edition, update number and issue date are read from the
-   cell itself (its DSID record, updates applied).
+   cell itself (its DSID record, updates applied). The update files
+   beside it must be exactly those from the one after the base's own
+   update number to the update number read with them applied; otherwise
+   a file was not applied and the build stops, naming the cell.
 4. **One copy of each cell** across the inputs: the latest issued (the
    issue date, not the highest edition: a cancellation has edition 0 and
    is the newest state). A copy whose issue date cannot be read, or two
@@ -55,9 +58,10 @@ update files to its base:
 Nothing is kept from one run to the next: no cache, no marker, no list.
 Every run works in a new folder of its own, `<work>/run-XXXXXXXX`, so
 nothing of an earlier run can be read and nothing is emptied before a
-run. A cell GDAL cannot read, a layer that fails to extract, a cell
-without an edition number: each stops the build (exit 1) and names the
-cell. Nothing is downloaded by the build: the mesh is built from exactly
+run. A folder of the charts that cannot be listed, a cell GDAL cannot
+read, a layer that fails to extract, a cell without an edition number, a
+cell with an update file that was not applied: each stops the build
+(exit 1) and names the folder or the cell. Nothing is downloaded by the build: the mesh is built from exactly
 the charts it is given.
 
 Coordinates are read in the source's own whole numbers, units of 1e-7
@@ -139,19 +143,22 @@ state is the set of shapes it is inside, found by flooding from outside
 everything and toggling a shape at each piece of its outline. Whole
 shapes are given, not shapes trimmed to the tile, so two neighbouring
 tiles cut their shared edge identically. From the cut the tile stage
-takes the water's outline pieces, one checked inner point per water part
-and per hole, the kept chart points, and keeps the cut triangles for the
-final check.
+takes the water's outline pieces (each with the water on its left and on
+its right), the kept chart points, and keeps the cut triangles.
 
 **Second stage**, once for the whole mesh: the tiles are joined (a side
 on a shared tile edge stays only where the water differs across it or a
 chart line lies on it); a corner where two pieces of the same input
 segment meet with the same water and the same mark on both is not a
-corner; one well-shaping run (Triangle, `pq20A`: 20° minimum angle where
+corner; one well-shaping run (Triangle, `pq20`: 20° minimum angle where
 the input allows) with one east-west scale for the mesh, `xScale` = cos
 of its middle latitude, which only affects how "well-shaped" is judged,
-never where anything is; neighbours, side and corner marks, the shore
-multiplier; the checks; the files.
+never where anything is. Triangle is given the outline and the chart
+points only, no point per water part or per hole; it triangulates
+everything the outline encloses, and each triangle takes the water of
+the cut triangle holding its centre (tested exactly); the triangles that
+are not water are dropped. Then neighbours, side and corner marks, the
+shore multiplier; the checks; the files.
 
 The second stage runs in its own interpreter, so it does not inherit the
 tile stage's memory.
@@ -195,33 +202,42 @@ gets the short box across the line, not the long one round the earth.
 
 Every check stops the build; there are no warnings that publish.
 
-Charts (exit 1): an input that is neither a zip nor a folder; no cell
-in the charts; a cell or a layer GDAL cannot read; a cell without an
-edition number; copies of a cell that cannot be decided between; a cell
-across the date line; no live cell with charted areas.
+Charts (exit 1): an input that is neither a zip nor a folder; a folder
+of the charts that cannot be listed; no cell in the charts; a cell or a
+layer GDAL cannot read; a cell without an edition number; a cell with an
+update file that was not applied; copies of a cell that cannot be
+decided between; a cell across the date line; no live cell with charted
+areas.
 
 Tile stage (exit 1): a tile whose cut fails or contradicts itself; a
-water part or hole too thin to hold a point (reported with its
-position); a chart point whose corner is not at the point's own
-position; a side whose mark differs between its two triangles.
+chart point whose corner is not at the point's own position; a side
+whose mark differs between its two triangles.
 
 Second stage (exit 2):
 
 - a side recorded more than twice, or twice other than on a tile edge;
-  two tiles' records of a tile-edge side with different marks; tile-edge
-  sides that overlap (two tiles cut their shared edge differently);
+  tile-edge sides that overlap (two tiles cut their shared edge
+  differently); outline pieces joined into one segment that disagree
+  about the water on each side;
 - the well-shaping step did not hand back the input corners unchanged;
-  a triangle across the date line, or a corner of a side on it that is
-  not on it; a triangle no water part's point reaches; a clockwise or
-  zero-area triangle;
+  a triangle whose centre lies in a tile that was cut but in none of its
+  cut triangles, or in cut triangles of different water; a triangle
+  across the date line, or a corner of a side on it that is not on it; a
+  clockwise or zero-area triangle;
 - a side shared by more than two triangles; a one-sided side that is not
   on an outline; a neighbour link that is not mutual;
+- **every triangle's water against the outline pieces' own record**,
+  independently of the lookup it was taken from: a triangle side on an
+  outline segment must have, on the triangle's side, the water the
+  pieces recorded there (and where no triangle lies across, the far side
+  must be recorded as not water); a side on no outline must have the
+  same water on both sides. Every triangle is joined to the outline
+  through sides of the second kind, so this fixes every triangle's
+  water;
 - a chart-line segment with no triangle side on it; a chart point that
   is not a corner of any triangle;
 - the mesh's water area differs from the cut's (by more than 1e-9 of
   it);
-- **every finished triangle's centre, tested exactly against the cut
-  triangles, must lie in water of the same attributes**;
 - a shore multiplier outside 1.0 to 1.3.
 
 The share of triangles under 20° is printed and does not gate (sharp
@@ -317,12 +333,14 @@ extracted layers and the cut of every tile, several GB for a district).
 - `tests/test_mesh_cells.py`: reading the charts, on the five-cell
   fixture of real cells: one copy per cell (the latest issued), the
   cancelled cell, what is extracted, a folder read in place, what cannot
-  be read. Needs GDAL and the mesh packages.
+  be read, an update file that was not applied, a folder that cannot be
+  listed. Needs GDAL and the mesh packages.
 - `tests/test_mesh_build.py` and `tests/test_mesh_dateline.py`: the mesh
   of hand-made cells, read back from the mesh files: only charted water,
   the most detailed chart wins, lines as marked sides over their whole
   length, points as marked corners, soundings, the format, the date
-  line. Hand-made shapes cannot be written as S-57 cells, so these give
+  line; a wrong water from the lookup, with the water area unchanged,
+  stops the build (the check against the outline record). Hand-made shapes cannot be written as S-57 cells, so these give
   the build its cells as shapes and run everything after the reading,
   through the same function `build-mesh.py` runs
   (`tests/build_from_shapes.py`). Need the mesh packages and CGAL.

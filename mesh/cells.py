@@ -6,7 +6,8 @@ this stage:
 
   1. unpacks each zip (a folder is read where it lies and is never written to);
   2. finds the cells. A .000 file whose name is not a NOAA cell name of bands 1 to 6 is not read, and is listed;
-  3. reads each copy's edition, update number and issue date from the cell itself, updates applied;
+  3. reads each copy's edition, update number and issue date from the cell itself, updates applied, and checks
+     that every update file beside it was applied;
   4. keeps one copy of each cell across the inputs, the latest issued (latest_copy);
   5. leaves out cancelled cells (edition 0 after updates: S-57 Appendix B.1, 5.7), and lists them;
   6. extracts each kept cell's layers that the mesh reads (mesh/build.py LAYERS) to GeoJSON, one file per layer.
@@ -14,8 +15,9 @@ this stage:
 A district's mesh is built from that district's charts and from nothing else: no other district's charts are
 read, and nothing is downloaded. All reading is done by GDAL (ogrinfo, ogr2ogr), which applies a cell's update
 files to its base. Nothing is kept from one run to the next and nothing of an earlier run is read: there is no
-cache, no marker and no list. A cell GDAL cannot read, a cell whose state cannot be told, and copies that cannot
-be decided between stop the build (ChartsError); nothing is left out silently.
+cache, no marker and no list. A folder that cannot be listed, a cell GDAL cannot read, a cell whose state cannot be
+told, a cell with an update file GDAL did not apply, and copies that cannot be decided between stop the build
+(ChartsError); nothing is left out silently.
 """
 import json
 import os
@@ -83,6 +85,18 @@ def gdal(args):
     return r.returncode, r.stdout, (err[-1] if err else "no message")
 
 
+def update_files(enc):
+    """The numbers of the update files lying beside a cell's .000 file (.001, .002, ...), sorted."""
+    folder, f = os.path.split(enc)
+    stem = os.path.splitext(f)[0]
+    out = []
+    for g in os.listdir(folder):
+        s, e = os.path.splitext(g)
+        if s == stem and re.fullmatch(r"\.\d{3}", e) and e != ".000":
+            out.append(int(e[1:]))
+    return sorted(out)
+
+
 def check_gdal():
     """ogrinfo and ogr2ogr must be installed, and ogrinfo new enough to answer in JSON."""
     for exe in ("ogrinfo", "ogr2ogr"):
@@ -143,8 +157,11 @@ class Charts:
         return root
 
     def _find(self, k, root):
-        out = []
-        for folder, subfolders, files in os.walk(root):
+        out, unlisted = [], []
+
+        def cannot_list(ex):
+            unlisted.append(f"{ex.filename}: {ex.strerror or ex}")
+        for folder, subfolders, files in os.walk(root, onerror=cannot_list):
             subfolders.sort()
             for f in sorted(files):
                 stem, ext = os.path.splitext(f)
@@ -154,6 +171,9 @@ class Charts:
                     out.append(Copy(stem.upper(), os.path.join(folder, f), k))
                 else:
                     self.not_cells[k].append(os.path.relpath(os.path.join(folder, f), root))
+        if unlisted:
+            raise problems(f"folder(s) of {self.inputs[k]} cannot be listed, so the cells in them cannot be found",
+                           unlisted)
         if self.not_cells[k]:
             self.log(f"charts: {len(self.not_cells[k])} .000 file(s) of {self.inputs[k]} are not named as NOAA cells "
                      f"and are not read: {', '.join(self.not_cells[k][:SHOWN])}")
@@ -161,18 +181,38 @@ class Charts:
 
     # -- 3: the state of every copy ----------------------------------------------------------------------------
     def _read_states(self, copies):
-        def one(c):
-            rc, out, err = gdal(["ogrinfo", "-ro", "-json", "-features", c.enc, "DSID"])
+        def dsid(c, updates):
+            rc, out, err = gdal(["ogrinfo", "-ro", "-json", "-features", "-oo", f"UPDATES={updates}", c.enc, "DSID"])
             if rc != 0:
-                return f"{c.name} ({c.enc}): {err}"
+                return None, f"{c.name} ({c.enc}): {err}"
             try:
-                p = json.loads(out)["layers"][0]["features"][0]["properties"]
+                return json.loads(out)["layers"][0]["features"][0]["properties"], None
             except (ValueError, LookupError, TypeError):
-                return f"{c.name} ({c.enc}): no data set record (DSID)"
+                return None, f"{c.name} ({c.enc}): no data set record (DSID)"
+
+        def one(c):
+            p, bad = dsid(c, "APPLY")
+            if bad:
+                return bad
             c.edition, c.update, c.issued = (None if p.get(k) is None else str(p[k])
                                              for k in ("DSID_EDTN", "DSID_UPDN", "DSID_ISDT"))
             if not c.edition:
                 return f"{c.name} ({c.enc}): no edition number, so it cannot be told whether the cell is cancelled"
+            base, bad = dsid(c, "IGNORE")
+            if bad:
+                return bad
+            # Updates apply in turn, each to the one before it, from the one after the base's own update number.
+            # The update files beside the cell must be exactly those, and the update number GDAL reports with
+            # them applied must be the last of them: otherwise a file was not applied.
+            try:
+                first, last = int(base.get("DSID_UPDN") or 0) + 1, int(c.update or 0)
+            except ValueError:
+                return f"{c.name} ({c.enc}): update number {base.get('DSID_UPDN')!r} of the base or {c.update!r} applied is not a number"
+            files = update_files(c.enc)
+            if files != list(range(first, last + 1)):
+                return (f"{c.name} ({c.enc}): its update files are not all applied: beside it lie "
+                        f"{', '.join(f'.{n:03d}' for n in files) or 'none'}; GDAL applied "
+                        + (f".{first:03d} to .{last:03d}" if last >= first else "none") + f" (base update number {first - 1})")
             return None
         bad = [b for b in self._each(one, copies) if b]
         if bad:

@@ -23,10 +23,12 @@ Build (``build-mesh.py``, mesh/cli.py):
                   points; nothing is drawn around them.
 2. ``finalize`` - join the tiles; decide once, for the whole mesh, which
                   points are real corners; one well-shaping run (Triangle
-                  q20); neighbours, side and corner marks, the shore
-                  multiplier; the checks, every one a gate, including
-                  every finished triangle tested exactly against the cut;
-                  the binary tiles and index.json.
+                  q20, given the outline and the chart points only); each
+                  triangle's water from the cut; neighbours, side and
+                  corner marks, the shore multiplier; the checks, every
+                  one a gate, including every triangle's water against
+                  the outline pieces' own record; the binary tiles and
+                  index.json.
 
 The mesh covers wherever the district's own cells have charted water.
 Nothing here is district-specific.

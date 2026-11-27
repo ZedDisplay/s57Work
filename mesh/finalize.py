@@ -19,13 +19,13 @@ interpreter: python -m mesh.finalize <work dir> <out mesh dir> <workers> <name>
             the chart's land (as cut) rising to 1.3 at the shore, except in narrow water (no lattice cell of
             the 2 km window around the spot is 1 km or more from land), where it stays 1.0.
   checks    All stop the build: a triangle whose centre lies in a tile that was cut but in none of its cut
-            triangles, or in cut triangles of different labels; a clockwise or zero-area triangle; a
-            neighbour link that is not mutual; a side shared by more than two triangles; a one-sided side that
-            is not on an outline; a chart point that is not a corner; a chart line with no side on it; water
-            area differing from the cut's; and every finished triangle's centre tested, exactly, against the
-            cut triangles: it must lie in water of the same label. Since the labels are now taken from that
-            same lookup, this last test repeats it and cannot disagree with it; the test that is independent
-            of the lookup is the water area.
+            triangles, or in cut triangles of different labels; outline pieces joined into one segment that
+            disagree about the water on each side; a clockwise or zero-area triangle; a neighbour link that is
+            not mutual; a side shared by more than two triangles; a one-sided side that is not on an outline; a
+            triangle whose water is not what the outline pieces recorded on its side of an outline segment, or
+            differs from the water across a side on no outline (this fixes every triangle's water from the
+            outline record, independently of the lookup the labels were taken from); a chart point that is not
+            a corner; a chart line with no side on it; water area differing from the cut's.
 """
 import glob, json, math, os, struct, sys, time
 from fractions import Fraction as Fr
@@ -83,9 +83,45 @@ def shifted(a, f):
         return a
     a = a.copy(); a[:, 0] += SHIFT[f]
     return a
+
+
+tile_set = {(t[0], t[1]): t[2] for t in tiles}          # tile -> its file
+tile_no = {(t[0], t[1]): n_ for n_, t in enumerate(tiles)}
+
+
+def tile_number(x, origin):
+    """The tile a position falls in, decided against the tile's own edges (whole numbers): a centre a hair west
+    of an edge is in the tile west of it, though the division alone rounds it onto the edge."""
+    t = np.floor((x - origin) / TILE).astype(np.int64)
+    t -= x < origin + t * TILE
+    t += x >= origin + (t + 1) * TILE
+    return t
+
+
+def orient_exact(ax, ay, bx, by, px, py):
+    return (Fr(bx) - Fr(ax)) * (Fr(py) - Fr(ay)) - (Fr(by) - Fr(ay)) * (Fr(px) - Fr(ax))
+
+
+def in_closed(A_, B_, C_, Pp):
+    """Per row: is point Pp in the closed triangle A_ B_ C_? Decided in floating point where the rounding
+    cannot change the sign, and exactly (fractions) where it could."""
+    def orient(a, b, p):
+        d = (b[:, 0] - a[:, 0]) * (p[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (p[:, 0] - a[:, 0])
+        err = 4e-16 * (np.abs((b[:, 0] - a[:, 0]) * (p[:, 1] - a[:, 1])) + np.abs((b[:, 1] - a[:, 1]) * (p[:, 0] - a[:, 0])))
+        return d, np.abs(d) <= err
+    d1, u1 = orient(A_, B_, Pp); d2, u2 = orient(B_, C_, Pp); d3, u3 = orient(C_, A_, Pp)
+    inside = ((d1 >= 0) & (d2 >= 0) & (d3 >= 0)) | ((d1 <= 0) & (d2 <= 0) & (d3 <= 0))
+    for n_ in np.flatnonzero(u1 | u2 | u3):
+        s1 = orient_exact(A_[n_, 0], A_[n_, 1], B_[n_, 0], B_[n_, 1], Pp[n_, 0], Pp[n_, 1])
+        s2 = orient_exact(B_[n_, 0], B_[n_, 1], C_[n_, 0], C_[n_, 1], Pp[n_, 0], Pp[n_, 1])
+        s3 = orient_exact(C_[n_, 0], C_[n_, 1], A_[n_, 0], A_[n_, 1], Pp[n_, 0], Pp[n_, 1])
+        inside[n_] = (s1 >= 0 and s2 >= 0 and s3 >= 0) or (s1 <= 0 and s2 <= 0 and s3 <= 0)
+    return inside
+
+
 lab_rows, mark_rows, lab_off, mark_off = [], [], [], []
 PA, PB, PG, PK, PLA, PLB, PMK = [], [], [], [], [], [], []
-SEEDS, HOLES, CPTS = [], [], []
+CPTS = []
 nl = nm = 0
 cut_water_units = 0.0
 for i, j, f in tiles:
@@ -97,10 +133,7 @@ for i, j, f in tiles:
     mk = z["pmk"].astype(np.int64); mk = np.where(mk >= 0, mk + nm, mk)
     PA.append(shifted(z["pa"], f)); PB.append(shifted(z["pb"], f)); PG.append(z["pg"]); PK.append(z["pk"])
     PLA.append(la); PLB.append(lb); PMK.append(mk)
-    sd = shifted(z["seeds"], f).copy()
-    if len(sd):
-        sd[:, 2] += nl
-    SEEDS.append(sd); HOLES.append(shifted(z["holes"], f)); CPTS.append(shifted(z["cpts"], f))
+    CPTS.append(shifted(z["cpts"], f))
     nl += len(z["labels"]); nm += len(z["marks"])
     cv, ct, cl = z["CV"], z["CT"], z["CL"]
     p = cv[ct[cl >= 0]]
@@ -114,10 +147,9 @@ PA = np.vstack(PA); PB = np.vstack(PB); PG = np.concatenate(PG); PK = np.concate
 PLA = lab_inv[np.concatenate(PLA)]
 plb = np.concatenate(PLB); PLB = np.where(plb >= 0, lab_inv[np.maximum(plb, 0)], plb)
 pmk = np.concatenate(PMK); PMK = np.where(pmk >= 0, mark_inv[np.maximum(pmk, 0)] if nm else -1, -1)
-SEEDS = np.vstack(SEEDS); SEEDS[:, 2] = lab_inv[SEEDS[:, 2].astype(np.int64)]
-HOLES = np.vstack(HOLES); CPTS = np.vstack(CPTS)
+CPTS = np.vstack(CPTS)
 log(f"tiles with chart shapes {len(tiles)}; outline pieces {len(PA):,}; water labels {len(LAB):,}; side marks {len(MARK):,}; "
-    f"water parts {len(SEEDS):,}; holes {len(HOLES):,}; chart points {len(CPTS):,}")
+    f"chart points {len(CPTS):,}")
 
 # ---------------------------------------------------------------- join
 t0 = time.time()
@@ -212,6 +244,21 @@ ends = ends[np.argsort(ends[:, 0], kind="stable")]
 SEG = np.column_stack([ends[0::2, 1], ends[1::2, 1]])
 fp = np.zeros(nch, dtype=np.int64); fp[ch[::-1]] = np.arange(ne)[::-1]
 SEG_MK = s_mk[fp]
+# The water on each side of an outline segment, as its pieces recorded it: each piece runs from s_va to s_vb with
+# s_la on its left and s_lb on its right. A segment's left and right are those of its first piece, in that piece's
+# direction; every piece joined into it must say the same, turned round where it runs the other way (the pieces of
+# a segment lie on one line, and their ends are whole numbers, so the direction test is exact).
+_dir = XY[s_vb] - XY[s_va]
+_way = (_dir * _dir[fp[ch]]).sum(axis=1)
+if (_way == 0).any():
+    fail(f"{int((_way == 0).sum())} outline pieces are not along the line of the segment they are joined into")
+_l, _r = np.where(_way > 0, s_la, s_lb), np.where(_way > 0, s_lb, s_la)
+SEG_LEFT, SEG_RIGHT = s_la[fp], s_lb[fp]
+SEG_DIR = _dir[fp]
+if ((_l != SEG_LEFT[ch]) | (_r != SEG_RIGHT[ch])).any():
+    _b0 = int(np.flatnonzero((_l != SEG_LEFT[ch]) | (_r != SEG_RIGHT[ch]))[0])
+    fail(f"{int(((_l != SEG_LEFT[ch]) | (_r != SEG_RIGHT[ch])).sum()):,} outline pieces disagree with the segment they are "
+         f"joined into about the water on each side; the first near {XY[s_va[_b0]] / U7}")
 log(f"join: tile-edge sides between the same water, dropped {n_seam_dropped:,}; tile-edge sides with nothing recorded on the other side {edge_single:,}; "
     f"corners that are not corners, removed {len(e1):,}; outline segments {nch:,}; {time.time() - t0:.0f} s"
     + (f"; chart-line marks on tile edges joined from two differing records {n_edge_marks_joined:,}" if n_edge_marks_joined else "")
@@ -283,18 +330,7 @@ if CROSSES:
 # ---- label every triangle from the cut by its centre, and keep the water
 _t0 = time.time()
 _cen = V[T].mean(axis=1) / sc
-
-
-def _tn(x, origin):
-    t = np.floor((x - origin) / TILE).astype(np.int64)
-    t -= x < origin + t * TILE
-    t += x >= origin + (t + 1) * TILE
-    return t
-
-
-_ti = _tn(_cen[:, 0], CT.ORIGIN_X); _tj = _tn(_cen[:, 1], CT.ORIGIN_Y)
-_tset = {(t[0], t[1]): t[2] for t in tiles}
-_tno = {(t[0], t[1]): n_ for n_, t in enumerate(tiles)}
+_ti = tile_number(_cen[:, 0], CT.ORIGIN_X); _tj = tile_number(_cen[:, 1], CT.ORIGIN_Y)
 _key = _ti * 100000 + _tj
 _o = np.argsort(_key, kind="stable")
 _b = np.flatnonzero(np.r_[True, _key[_o][1:] != _key[_o][:-1]])
@@ -306,31 +342,15 @@ def _label_job(k_):
     cut, but in none of its cut triangles; -3 in cut triangles of different labels; -4 in a tile no chart
     reaches, which has no cut: not charted, so not in the mesh)."""
     g = _groups[k_]
-    if k_ not in _tset:
+    if k_ not in tile_set:
         return k_, np.full(len(g), -4, dtype=np.int64)
-    z = np.load(_tset[k_])
-    cv, ct, cl = shifted(z["CV"], _tset[k_]), z["CT"], z["CL"]
-    want = lab_inv[lab_off[_tno[k_]] + np.maximum(cl, 0)]
+    z = np.load(tile_set[k_])
+    cv, ct, cl = shifted(z["CV"], tile_set[k_]), z["CT"], z["CL"]
+    want = lab_inv[lab_off[tile_no[k_]] + np.maximum(cl, 0)]
     want = np.where(cl >= 0, want, -1)
     pts = _cen[g]
     pi, tq = shapely.STRtree(shapely.polygons(cv[ct])).query(shapely.points(pts), predicate="intersects")
-    A_, B_, C_ = cv[ct[tq, 0]], cv[ct[tq, 1]], cv[ct[tq, 2]]
-    Pp = pts[pi]
-
-    def orient(a, b, p):
-        d = (b[:, 0] - a[:, 0]) * (p[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (p[:, 0] - a[:, 0])
-        err = 4e-16 * (np.abs((b[:, 0] - a[:, 0]) * (p[:, 1] - a[:, 1])) + np.abs((b[:, 1] - a[:, 1]) * (p[:, 0] - a[:, 0])))
-        return d, np.abs(d) <= err
-
-    def ex(ax, ay, bx, by, px, py):
-        return (Fr(bx) - Fr(ax)) * (Fr(py) - Fr(ay)) - (Fr(by) - Fr(ay)) * (Fr(px) - Fr(ax))
-    d1, u1 = orient(A_, B_, Pp); d2, u2 = orient(B_, C_, Pp); d3, u3 = orient(C_, A_, Pp)
-    inside = ((d1 >= 0) & (d2 >= 0) & (d3 >= 0)) | ((d1 <= 0) & (d2 <= 0) & (d3 <= 0))
-    for n_ in np.flatnonzero(u1 | u2 | u3):
-        s1 = ex(A_[n_, 0], A_[n_, 1], B_[n_, 0], B_[n_, 1], Pp[n_, 0], Pp[n_, 1])
-        s2 = ex(B_[n_, 0], B_[n_, 1], C_[n_, 0], C_[n_, 1], Pp[n_, 0], Pp[n_, 1])
-        s3 = ex(C_[n_, 0], C_[n_, 1], A_[n_, 0], A_[n_, 1], Pp[n_, 0], Pp[n_, 1])
-        inside[n_] = (s1 >= 0 and s2 >= 0 and s3 >= 0) or (s1 <= 0 and s2 <= 0 and s3 <= 0)
+    inside = in_closed(cv[ct[tq, 0]], cv[ct[tq, 1]], cv[ct[tq, 2]], pts[pi])
     lab = np.full(len(g), -2, dtype=np.int64)
     for i_, w_ in zip(pi[inside].tolist(), want[tq[inside]].tolist()):
         lab[i_] = w_ if lab[i_] in (-2, w_) else -3
@@ -359,10 +379,6 @@ if CROSSES:
         bad = np.flatnonzero((tx.min(axis=1) < LINE_X) & (tx.max(axis=1) > LINE_X))
         c = V[T[bad[0]]].mean(axis=0)
         fail(f"{len(bad):,} triangles lie across the date line; the first at lat {c[1] / U7:.7f}")
-if (TA < 0).any():
-    bad = np.flatnonzero(TA < 0)
-    c = V[T[bad[0]]].mean(axis=0)
-    fail(f"{len(bad):,} triangles are reached by no water part's point; the first at lat {c[1] / U7:.7f}, lon {c[0] / K / U7:.7f}")
 a_, b_, c_ = V[T[:, 0]], V[T[:, 1]], V[T[:, 2]]
 cr = (b_[:, 0] - a_[:, 0]) * (c_[:, 1] - a_[:, 1]) - (b_[:, 1] - a_[:, 1]) * (c_[:, 0] - a_[:, 0])
 if (cr <= 0).any():
@@ -400,6 +416,32 @@ if (seg_of_side[on_seg] < 0).any():
     fail("a side lies on an outline piece the well-shaping step did not attribute to an input segment")
 side_mark = np.where(seg_of_side >= 0, SEG_MK[np.maximum(seg_of_side, 0)], -1).reshape(3, nT).T      # (nT, 3)
 log(f"neighbours and side marks: {time.time() - t0:.0f} s; sides on a chart line {int((side_mark >= 0).sum()):,}")
+# ---- every triangle's water against the outline's own record of the water on each side (not the cut lookup the
+# labels came from). Side k of a triangle runs from its corner k to its corner k + 1 with the triangle on its left
+# (all triangles are anticlockwise, checked above). A side on an outline segment: the triangle's water is the
+# segment's water on the triangle's side, and where no triangle lies across, the segment's water on the far side is
+# not water. A side on no outline segment: the same water on both sides. Every triangle is joined to the outline
+# through sides of the second kind, so this fixes every triangle's water from the outline record alone.
+t0 = time.time()
+_q = np.flatnonzero(seg_of_side >= 0)
+_t, _k, _m = tri_id[_q], edge_k[_q], seg_of_side[_q]
+_side = V[T[_t, (_k + 1) % 3]] - V[T[_t, _k]]
+_along = (_side * (SEG_DIR[_m] * sc)).sum(axis=1)
+if (_along == 0).any():
+    fail(f"{int((_along == 0).sum())} triangle sides on an outline segment are not along it")
+_own = np.where(_along > 0, SEG_LEFT[_m], SEG_RIGHT[_m])
+_far = np.where(_along > 0, SEG_RIGHT[_m], SEG_LEFT[_m])
+_bad = (TA[_t] != _own) | ((NB[_t, _k] < 0) & (_far >= 0))
+_q2 = np.flatnonzero(seg_of_side < 0)
+_t2, _k2 = tri_id[_q2], edge_k[_q2]
+_bad2 = TA[_t2] != TA[NB[_t2, _k2]]                 # one-sided sides off the outline have failed above (cracks)
+for _n, _what, _tt in ((int(_bad.sum()), "not the water the outline records on their side", _t[_bad]),
+                       (int(_bad2.sum()), "not the same water as the triangle across a side that is on no outline", _t2[_bad2])):
+    if _n:
+        c = V[T[_tt[0]]].mean(axis=0)
+        fail(f"{_n:,} triangle sides: the triangle's water is {_what}; the first at lat {c[1] / U7:.7f}, lon {c[0] / K / U7:.7f}")
+log(f"water against the outline record: {len(_q):,} triangle sides on the outline, {len(_q2):,} off it; all agree; "
+    f"{time.time() - t0:.0f} s")
 marked_segs = np.flatnonzero(SEG_MK >= 0)
 seen_seg = np.zeros(len(SEG_MK), bool); seen_seg[seg_of_side[seg_of_side >= 0]] = True
 if not seen_seg[marked_segs].all():
@@ -427,18 +469,8 @@ if abs(mesh_water_units - cut_water_units) > 1e-9 * cut_water_units:
 # which tile each triangle is filed under: the tile holding its centre
 cen = V[T].mean(axis=1)
 cen_u = cen / sc
-def tile_number(x, origin):
-    """The tile a position falls in, decided against the tile's own edges (whole numbers): a centre a hair west
-    of an edge is in the tile west of it, though the division alone rounds it onto the edge."""
-    t = np.floor((x - origin) / TILE).astype(np.int64)
-    t -= x < origin + t * TILE
-    t += x >= origin + (t + 1) * TILE
-    return t
-
-
 ti = tile_number(cen_u[:, 0], CT.ORIGIN_X)
 tj = tile_number(cen_u[:, 1], CT.ORIGIN_Y)
-tile_set = {(t[0], t[1]): t[2] for t in tiles}
 tkey = ti * 100000 + tj
 ot = np.argsort(tkey, kind="stable")
 tb_ = np.flatnonzero(np.r_[True, tkey[ot][1:] != tkey[ot][:-1]])
@@ -448,51 +480,13 @@ if missing_t:
     fail(f"triangles lie in {len(missing_t)} tiles that have no cut: {missing_t[:5]}")
 
 
-# ---------------------------------------------------------------- the check against the chart, and the shore multiplier, per tile
-def orient_exact(ax, ay, bx, by, px, py):
-    return (Fr(bx) - Fr(ax)) * (Fr(py) - Fr(ay)) - (Fr(by) - Fr(ay)) * (Fr(px) - Fr(ax))
-
-
+# ---------------------------------------------------------------- the shore multiplier, per tile
 def tile_job(k_):
-    """For one tile: (a) every finished triangle filed under it has its centre tested exactly against the tile's
-    cut triangles; returns the number whose centre is not in water of the same label, with one example;
-    (b) the shore multiplier per triangle."""
+    """For one tile: the shore multiplier of every triangle filed under it."""
     i, j = k_
     g = groups[k_]
     z = np.load(tile_set[k_])
-    cv, ct, cl = shifted(z["CV"], tile_set[k_]), z["CT"], z["CL"]
-    polys_ = shapely.polygons(cv[ct])
-    tree = shapely.STRtree(polys_)
     pts = cen_u[g]
-    want = lab_inv[lab_off[tile_no[k_]] + np.maximum(cl, 0)]
-    want = np.where(cl >= 0, want, -1)                         # global label per cut triangle, -1 = not water
-    q = tree.query(shapely.points(pts), predicate="intersects")
-    # exact confirmation of each candidate pair: the point is in the closed triangle
-    pi, tq = q
-    A_, B_, C_ = cv[ct[tq, 0]], cv[ct[tq, 1]], cv[ct[tq, 2]]
-    Pp = pts[pi]
-    def orient(a, b, p):
-        d = (b[:, 0] - a[:, 0]) * (p[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (p[:, 0] - a[:, 0])
-        err = 4e-16 * (np.abs((b[:, 0] - a[:, 0]) * (p[:, 1] - a[:, 1])) + np.abs((b[:, 1] - a[:, 1]) * (p[:, 0] - a[:, 0])))
-        return d, np.abs(d) <= err
-    d1, u1 = orient(A_, B_, Pp); d2, u2 = orient(B_, C_, Pp); d3, u3 = orient(C_, A_, Pp)
-    unsure = u1 | u2 | u3
-    inside = ((d1 >= 0) & (d2 >= 0) & (d3 >= 0)) | ((d1 <= 0) & (d2 <= 0) & (d3 <= 0))
-    for n_ in np.flatnonzero(unsure):
-        s1 = orient_exact(A_[n_, 0], A_[n_, 1], B_[n_, 0], B_[n_, 1], Pp[n_, 0], Pp[n_, 1])
-        s2 = orient_exact(B_[n_, 0], B_[n_, 1], C_[n_, 0], C_[n_, 1], Pp[n_, 0], Pp[n_, 1])
-        s3 = orient_exact(C_[n_, 0], C_[n_, 1], A_[n_, 0], A_[n_, 1], Pp[n_, 0], Pp[n_, 1])
-        inside[n_] = (s1 >= 0 and s2 >= 0 and s3 >= 0) or (s1 <= 0 and s2 <= 0 and s3 <= 0)
-    pi, tq = pi[inside], tq[inside]
-    mine = TA[g]
-    okl = want[tq] == mine[pi]
-    found = np.zeros(len(g), bool); found[pi] = True
-    wrong = np.zeros(len(g), bool); wrong[pi[~okl]] = True
-    bad = wrong | ~found
-    ex = None
-    if bad.any():
-        b0 = int(np.flatnonzero(bad)[0])
-        ex = (float(pts[b0, 1] / U7), float(pts[b0, 0] / U7), "in no cut triangle" if not found[b0] else "in a cut triangle of another label or not water")
     # ---- shore multiplier (land = chart land as cut, from this tile and its neighbours)
     PG_W, PG_S, PG_RES = -75.5, 38.7, 0.00025
     m3 = 0.03
@@ -531,25 +525,16 @@ def tile_job(k_):
         sm = shore[gi, gj]
     else:
         sm = np.ones(len(g), dtype=np.float32)
-    return k_, int(bad.sum()), ex, sm
+    return k_, sm
 
 
-tile_no = {(t[0], t[1]): n_ for n_, t in enumerate(tiles)}
 t0 = time.time()
 SHORE = np.ones(nT, dtype=np.float32)
-n_bad = 0; examples = []
 from multiprocessing import get_context
 with get_context("fork").Pool(workers) as pool:
-    for k_, nb_, ex, sm in pool.imap_unordered(tile_job, sorted(groups), chunksize=1):
+    for k_, sm in pool.imap_unordered(tile_job, sorted(groups), chunksize=1):
         SHORE[groups[k_]] = sm
-        n_bad += nb_
-        if ex and len(examples) < 10:
-            examples.append((k_, ex))
-log(f"check against the chart: {nT:,} triangle centres tested exactly against the cut; not in water of the same label: {n_bad:,}; shore multiplier computed; {time.time() - t0:.0f} s")
-for e in examples:
-    log(f"   tile {e[0]}: lat {e[1][0]:.7f}, lon {e[1][1]:.7f}: {e[1][2]}")
-if n_bad:
-    fail("finished triangles disagree with the chart")
+log(f"shore multiplier computed; {time.time() - t0:.0f} s")
 if ((SHORE < 1.0) | (SHORE > 1.3 + 1e-6)).any():
     fail("shore multiplier outside 1.0 to 1.3")
 

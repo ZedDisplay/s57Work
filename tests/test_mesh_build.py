@@ -368,5 +368,43 @@ class ChartLineOnATileEdge(unittest.TestCase):
         self.assertEqual(float(m["depth"][h.mesh_triangle_at(m, -71.45, 41.07)]), 10.0)
 
 
+@unittest.skipUnless(HAVE_MESH_DEPS and h.HAVE_CGAL, "needs the mesh packages and a C++ compiler with CGAL")
+class TheWaterIsCheckedAgainstTheOutline(unittest.TestCase):
+    """Each triangle's water is taken from the cut by its centre; it is then checked against the outline
+    pieces' own record of the water on each side. Two depth areas side by side, 3 m and 10 m, in one tile: with
+    the cut's labels of the two swapped in the kept tile (the outline record left as it was), the lookup gives
+    every triangle the other area's water, the water area is unchanged, and the build must stop all the same."""
+
+    def test_a_wrong_label_from_the_lookup_stops_the_build(self):
+        import sys
+        with tempfile.TemporaryDirectory(prefix="s57meshoutline-") as tmp:
+            folder = Path(tmp) / "shapes"
+            own = [h.shapes_cell(folder, "band5", "US5XX1AA", {
+                "DEPARE": [area((-71.60, 41.05, -71.55, 41.10), {"DRVAL1": 3.0}),
+                           area((-71.55, 41.05, -71.52, 41.10), {"DRVAL1": 10.0})]})]
+            p = h.build_from_shapes(tmp, "SIDES", own, keep=True)
+            self.assertEqual(p.returncode, 0, p.stdout[-3000:] + p.stderr[-3000:])
+            self.assertIn("water against the outline record:", p.stdout)
+            run, = (Path(tmp) / "work").iterdir()
+            tile, = (run / "tiles").glob("tile_*.npz")
+
+            def finalize(out):
+                return subprocess.run([sys.executable, "-m", "mesh.finalize", str(run), str(Path(tmp) / out), "1", "SIDES"],
+                                      cwd=h.ROOT, capture_output=True, text=True)
+            again = finalize("again")
+            self.assertEqual(again.returncode, 0, again.stdout[-3000:] + again.stderr[-3000:])
+            z = dict(np.load(tile))
+            depth = list(z["labels"][:, 2])          # COLS: land, struct, depth, ...
+            a, b = depth.index(3.0), depth.index(10.0)
+            cl = z["CL"].copy()
+            cl[z["CL"] == a], cl[z["CL"] == b] = b, a
+            z["CL"] = cl
+            np.savez_compressed(tile, **z)
+            swapped = finalize("swapped")
+        self.assertEqual(swapped.returncode, 2, swapped.stdout[-3000:] + swapped.stderr[-3000:])
+        self.assertIn("the triangle's water is not the water the outline records on their side", swapped.stdout)
+        self.assertNotIn("water area differs", swapped.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

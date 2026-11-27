@@ -11,9 +11,10 @@ What it does, per 0.25-degree tile of the fixed world lattice:
      corner that is a point of the winning chart, are recorded with what the chart says about them. A sounding
      is kept where it is shallower than the depth area it lies in (or lies in none);
   5. writes the tile's outline pieces (un-merged: whether a point is a real corner is decided after the tiles
-     are joined), one checked inner point per water part and per hole, the kept chart points, and the cut
-     triangles themselves for the final check.
-Nothing is dropped silently: a part or hole that cannot hold a point stops the build with its position.
+     are joined), the kept chart points, and the cut triangles themselves. An outline piece runs from pa to pb
+     with the cut triangle it was taken from on its left (the cut's triangles are anticlockwise and side k of
+     a triangle runs from its corner k + 1 to its corner k + 2): pla is the water on its left, plb the water on
+     its right (-1 not water, -2 outside the tile box).
 
 The cells are those the first stage read from the district's charts (mesh/cells.py): one copy of each, each with
 the files of its layers. The tiles built are those the cells reach (the bounding box of each cell's
@@ -21,7 +22,6 @@ skin-of-the-earth areas); the mesh holds all the water those cells chart, the mo
 every spot. No other district's charts are read.
 """
 import functools, json, math, os, resource, subprocess, sys, time
-from fractions import Fraction as Fr
 import numpy as np, shapely
 from shapely.geometry import shape
 from scipy.sparse import coo_matrix
@@ -184,27 +184,6 @@ def tiles_reached(cells):
             for j in range(int((y0 * U7 - ORIGIN_Y) // TILE), int((y1 * U7 - ORIGIN_Y) // TILE) + 1):
                 tiles.add((i, j))
     return sorted(tiles)
-
-
-def strictly_inside(tri, p):
-    ax, ay, bx, by, cx, cy = (Fr(float(v)) for v in tri.reshape(6))
-    px, py = Fr(float(p[0])), Fr(float(p[1]))
-    d1 = (bx - ax) * (py - ay) - (by - ay) * (px - ax)
-    d2 = (cx - bx) * (py - by) - (cy - by) * (px - bx)
-    d3 = (ax - cx) * (py - cy) - (ay - cy) * (px - cx)
-    return (d1 > 0 and d2 > 0 and d3 > 0) or (d1 < 0 and d2 < 0 and d3 < 0)
-
-
-def inner_point(V, T, area, members, what, tile):
-    """The centre of the group's largest triangle, checked exactly to lie strictly inside it. A group whose
-    largest triangle cannot hold its own centre as an ordinary number stops the build."""
-    t = members[int(np.argmax(area[members]))]
-    tri = V[T[t]]
-    p = tri.mean(axis=0)
-    if not strictly_inside(tri, p):
-        raise RuntimeError(f"{what} too thin to hold a point: tile {tile}, at lat {p[1] / U7:.7f}, lon {p[0] / U7:.7f}, "
-                           f"{len(members)} triangles, largest {area[t] * 1.23e-4:.3g} m2")
-    return p
 
 
 def rules(states_active, shapes):
@@ -469,14 +448,12 @@ def process_tile(ij):
         label_of_key = np.full(len(ukeys), -1, dtype=np.int64); label_of_key[water_keys] = np.arange(len(water_keys))
         lab = label_of_key[key]                                   # per triangle: label, -1 = not water
         part_of = np.full(nt, -1, dtype=np.int64)
-        seeds, hole_pts = [], []
+        n_parts = n_holes = 0
         for members in groups:
             if hole[members[0]]:
-                p = inner_point(V, T, area, members, "a hole (land or uncharted)", (i, j))
-                hole_pts.append(p)
+                n_holes += 1
             else:
-                p = inner_point(V, T, area, members, "a water part", (i, j))
-                part_of[members] = len(seeds); seeds.append([p[0], p[1], lab[members[0]]])
+                part_of[members] = n_parts; n_parts += 1
         T_["3 mark+parts"] = time.perf_counter() - t2
         t3 = time.perf_counter()
         # outline pieces: a side between two parts, each side once
@@ -528,7 +505,7 @@ def process_tile(ij):
                 cpts.append([V[v_, 0], V[v_, 1], bits, val])
         kx = 111320.0 * math.cos(math.radians((south + north) / 2)) / U7; ky = 110570.0 / U7
         m2 = kx * ky
-        st.update(water=bool(water.any()), parts=len(seeds), holes=len(hole_pts), cut_tris=int(nt), pieces=int(len(pa)),
+        st.update(water=bool(water.any()), parts=n_parts, holes=n_holes, cut_tris=int(nt), pieces=int(len(pa)),
                   line_sides=int((pmk >= 0).sum()), line_sides_inside_a_part=n_inside, corner_points=len(cpts),
                   water_m2=float(area[water].sum() * m2), land_m2=float(area[ukeys[key][:, 0] != 0].sum() * m2),
                   nochart_m2=float(area[ukeys[key][:, NC] != 0].sum() * m2),
@@ -536,7 +513,6 @@ def process_tile(ij):
                   same_rank_overlap_m2=float(area[overlap_states[ST]].sum() * m2))
         np.savez_compressed(f"{OUT}/tile_{i}_{j}.npz", pa=pa, pb=pb, pg=pg, pk=pk, pla=pla, plb=plb, pmk=pmk,
                             labels=ukeys[water_keys], marks=np.array(marks, dtype=np.float64).reshape(-1, 3),
-                            seeds=np.array(seeds, dtype=np.float64).reshape(-1, 3), holes=np.array(hole_pts, dtype=np.float64).reshape(-1, 2),
                             cpts=np.array(cpts, dtype=np.float64).reshape(-1, 4), CV=V, CT=T, CL=lab.astype(np.int32),
                             CLAND=(ukeys[key][:, 0] != 0))
         T_["4 outline"] = time.perf_counter() - t3
